@@ -1,0 +1,7 @@
+{
+	"required": true,
+	"package": "de.schmodas.multimedia.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["LevelEventHandlerMixin", "SignEditScreenMixin", "SoundManagerAccessor", "ParticlePacketMixin", "SoundEngineAccessor", "ChannelAccessor", "ChannelMixin", "LibraryMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

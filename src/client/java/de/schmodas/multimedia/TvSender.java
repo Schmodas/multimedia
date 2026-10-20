@@ -1,0 +1,816 @@
+package de.schmodas.multimedia;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Locale;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+/**
+ * Senden: Ein Monitor wird aufgenommen (Windows: ddagrab), mit der Grafikkarte (NVENC) oder notfalls dem
+ * Prozessor (x264) zu H.264 gewandelt und als MPEG-TS an alle Zuschauer verteilt. Einmal umwandeln, an alle
+ * verschicken. Zuschauer verbinden sich direkt mit diesem PC und müssen den geheimen Schlüssel aus der
+ * Einladung mitschicken – sonst bekommen sie nichts.
+ * Beim Schließen von Minecraft endet alles (ffmpeg merkt, dass niemand mehr liest, und beendet sich auch).
+ */
+public final class TvSender {
+	static final String HELLO = "MMTV1 ";
+	private static final boolean WINDOWS = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win");
+	private static final String SCALE = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2";
+	/** Puffer pro Zuschauer; ist er voll (zu langsames Internet), wird der Zuschauer getrennt und verbindet neu. */
+	private static final int VIEWER_QUEUE = 512;
+
+	private static volatile TvSender current;
+
+	private volatile int monitor;
+	private volatile String sound;
+	/** Monitor/Ton wurde während des Sendens geändert: Aufnahme neu starten, Zuschauer bleiben verbunden. */
+	private volatile boolean restart;
+	/** Bitrate des Bildes (kbit/s): bis 3 Zuschauer 3000, darüber weniger, damit der Upload reicht. */
+	private volatile int bitrateK = 3000;
+	/** So viel Upload dürfen alle Zuschauer zusammen ungefähr brauchen (kbit/s). */
+	private static final int UPLOAD_BUDGET_K = 10_000;
+	private volatile Consumer<String> changeStatus;
+	private final List<Process> processes = new CopyOnWriteArrayList<>();
+	private final List<Viewer> viewers = new CopyOnWriteArrayList<>();
+	private volatile boolean stopped;
+	private volatile Process ffmpeg;
+	private ServerSocket server;
+	private volatile String encoderName = "?";
+	/** Direkte Verbindungen zu Freunden (UDP, siehe P2p). */
+	private P2p.Endpoint udp;
+	private volatile P2p.StunResult stun;
+	private final Map<Long, UdpViewer> udpViewers = new ConcurrentHashMap<>();
+	/** Zuschauer, die gefragt haben, während nicht gesendet wurde – bekommen beim Start Bescheid. */
+	private static final Set<String> WAITING = ConcurrentHashMap.newKeySet();
+	/** Die letzten Pakete (zum Nachsenden), Nummer = seq. */
+	private static final int RING = 8192;
+	private final byte[][] ring = new byte[RING][];
+	private volatile int producedSeq;
+	private final Object newData = new Object();
+	/** Höchstens so viel hochladen (Bytes/s, alle Zuschauer zusammen) – lässt bei 17 Mbit/s Luft. */
+	private static final double MAX_UPLOAD = 13_000_000 / 8.0;
+
+	private TvSender(int monitor, String sound) {
+		this.monitor = monitor;
+		this.sound = sound;
+	}
+
+	public static boolean isSending() {
+		return current != null && !current.stopped;
+	}
+
+	public static TvSender current() {
+		return current;
+	}
+
+	/** Zuschauer (ohne einen selbst). */
+	public int viewerCount() {
+		int n = 0;
+		for (Viewer v : viewers) {
+			if (!v.local) {
+				n++;
+			}
+		}
+		for (UdpViewer v : udpViewers.values()) {
+			if (v.addr != null) {
+				n++;
+			}
+		}
+		return n;
+	}
+
+	public String encoderName() {
+		return encoderName;
+	}
+
+	/** Hinweis zur Erreichbarkeit (leer, wenn alles gut aussieht). */
+	public String networkInfo() {
+		P2p.StunResult r = stun;
+		if (r == null) {
+			return "";
+		}
+		if (r.mapped() == null) {
+			return T.t("Achtung: Konnte nicht prüfen, wie du von außen erreichbar bist (UDP blockiert?) – Freunde sehen dich evtl. nicht.");
+		}
+		if (r.symmetric()) {
+			return T.t("Achtung: Dein Router macht es schwer, direkt verbunden zu werden – bei manchen Freunden klappt es evtl. nicht.");
+		}
+		return "";
+	}
+
+	/** Startet das Senden (oder lässt ein laufendes weiterlaufen). Meldungen gehen an status. */
+	public static synchronized void start(int monitor, String sound, Consumer<String> status, Runnable onReady) {
+		if (isSending()) {
+			if (current.monitor == monitor && current.sound.equals(sound)) {
+				onReady.run();
+				return;
+			}
+			current.stop();
+		}
+		TvSender s = new TvSender(monitor, sound);
+		current = s;
+		Thread t = new Thread(() -> s.run(status, onReady), "MultiMedia-TvSend");
+		t.setDaemon(true);
+		t.start();
+	}
+
+	/** Passt die Bildqualität an die Zahl der Zuschauer an (runter sofort nach 5 s, wieder rauf erst nach 30 s). */
+	private void qualityLoop() {
+		long wantSince = 0;
+		int lastWant = bitrateK;
+		while (!stopped) {
+			P2p.sleep(2000);
+			int viewers = viewerCount();
+			int want = viewers <= 3 ? 3000 : Math.max(1200, (UPLOAD_BUDGET_K / viewers) / 100 * 100);
+			if (want != lastWant) {
+				lastWant = want;
+				wantSince = System.currentTimeMillis();
+			}
+			long stable = System.currentTimeMillis() - wantSince;
+			boolean down = want < bitrateK && stable > 5_000;
+			boolean up = want > bitrateK && stable > 30_000;
+			if ((down || up) && !restart && ffmpeg != null) {
+				MultiMediaClient.LOGGER.info("Senden: {} Zuschauer – Bildqualität {} -> {} kbit/s", viewers, bitrateK, want);
+				bitrateK = want;
+				restart = true;
+				for (Process p : processes) {
+					p.descendants().forEach(ProcessHandle::destroyForcibly);
+					p.destroyForcibly();
+				}
+				MultiMediaClient.info(down ? T.t("Viele Zuschauer – Bildqualität etwas runter, damit dein Internet reicht.")
+						: T.t("Weniger Zuschauer – volle Bildqualität."));
+			}
+		}
+	}
+
+	/** Monitor/Ton ändern, ohne das Senden zu beenden. False, wenn gerade nicht gesendet wird. */
+	public static synchronized boolean change(int monitor, String sound, Consumer<String> status) {
+		TvSender s = current;
+		if (s == null || s.stopped) {
+			return false;
+		}
+		if (s.monitor == monitor && s.sound.equals(sound)) {
+			status.accept(T.t("Keine Änderung – du sendest schon Monitor ") + (monitor + 1) + ".");
+			return true;
+		}
+		s.monitor = monitor;
+		s.sound = sound;
+		s.changeStatus = status;
+		s.restart = true;
+		for (Process p : s.processes) {
+			p.descendants().forEach(ProcessHandle::destroyForcibly);
+			p.destroyForcibly();
+		}
+		status.accept(T.t("Wechsle zu Monitor ") + (monitor + 1) + " …");
+		return true;
+	}
+
+	public static synchronized void stopAll() {
+		if (current != null) {
+			current.stop();
+			current = null;
+		}
+	}
+
+	// ------------------------------------------------------------------ Ablauf
+
+	private void run(Consumer<String> status, Runnable onReady) {
+		try {
+			Tools.Paths paths = Tools.ensure(status).get();
+			int port = Settings.tvPort();
+			server = new ServerSocket();
+			server.setReuseAddress(true);
+			server.bind(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 16); // nur für die eigene Leinwand
+			Thread accept = new Thread(this::acceptLoop, "MultiMedia-TvAccept");
+			accept.setDaemon(true);
+			accept.start();
+
+			// Direkte Verbindungen zu Freunden: UDP-Anschluss, Adresse von außen erfragen (und wach halten)
+			udp = new P2p.Endpoint();
+			udp.onPacket(this::onUdp);
+			Thread router = new Thread(() -> {
+				while (!stopped) {
+					P2p.StunResult r = udp.stun();
+					if (stun == null || r.mapped() != null) {
+						stun = r;
+					}
+					MultiMediaClient.LOGGER.info("Senden: von außen erreichbar als {}{}", r.mapped() == null ? "?" : P2p.format(r.mapped()),
+							r.symmetric() ? " (Router wechselt Ports – schwierig)" : "");
+					for (int i = 0; i < 25 && !stopped; i++) {
+						P2p.sleep(1000);
+					}
+				}
+			}, "MultiMedia-Stun");
+			router.setDaemon(true);
+			router.start();
+			Thread quality = new Thread(this::qualityLoop, "MultiMedia-TvQuality");
+			quality.setDaemon(true);
+			quality.start();
+			Thread pacer = new Thread(this::pacerLoop, "MultiMedia-TvPacer");
+			pacer.setDaemon(true);
+			pacer.start();
+
+			// Aufnahme starten: erst Grafikkarte, dann Prozessor, dann einfache Aufnahme
+			// Bricht eine Variante kurz nach dem Start ab, gleich die nächste versuchen.
+			// Wird Monitor/Ton geändert, startet die Aufnahme neu – Zuschauer bleiben verbunden.
+			boolean ready = false;
+			outer:
+			while (!stopped) {
+				restart = false;
+				boolean started = false;
+				List<Variant> list = variants();
+				for (int vi = 0; vi < list.size() && !stopped; vi++) {
+					Variant v = list.get(vi);
+					if (!startEncoder(paths, v)) {
+						continue;
+					}
+					started = true;
+					encoderName = T.t(v.name);
+					if (!ready) {
+						ready = true;
+						for (int i = 0; i < 60 && stun == null; i++) {
+							P2p.sleep(100);
+						}
+						onReady.run();
+						// wer vorhin gefragt hat, bekommt Bescheid, dass es losgeht
+						for (String w : WAITING) {
+							TvSignal.answer(w, 0, "on", List.of());
+						}
+						WAITING.clear();
+					} else if (changeStatus != null) {
+						changeStatus.accept(T.t("Du sendest jetzt Monitor ") + (monitor + 1) + " (" + encoderName + ", " + soundInfo + ").");
+						changeStatus = null;
+					}
+					long began = System.currentTimeMillis();
+					try {
+						pump();
+					} catch (IOException e) {
+						if (!restart && !stopped) {
+							throw e;
+						}
+					}
+					processes.forEach(Process::destroyForcibly);
+					processes.clear();
+					if (stopped) {
+						return;
+					}
+					if (restart) {
+						continue outer;
+					}
+					if (System.currentTimeMillis() - began > 20_000 || vi == list.size() - 1) {
+						break outer; // lief eine Weile – echter Abbruch
+					}
+					MultiMediaClient.LOGGER.info("Senden: Variante '{}' brach gleich ab ({}), versuche die nächste", v.name, lastError);
+				}
+				if (!started) {
+					break;
+				}
+			}
+			if (!stopped) {
+				MultiMediaClient.LOGGER.warn("Senden: Aufnahme beendet ({})", lastError);
+				status.accept(ready ? T.t("Senden beendet: Aufnahme ist abgebrochen (") + lastError + ")"
+						: T.t("Bildschirm-Aufnahme ging nicht: ") + lastError);
+				stop();
+			}
+		} catch (Exception e) {
+			if (!stopped) {
+				MultiMediaClient.LOGGER.warn("Senden fehlgeschlagen", e);
+				status.accept(T.t("Senden fehlgeschlagen: ") + e.getMessage());
+			}
+			stop();
+		}
+	}
+
+	private record Variant(String name, List<String> input, List<String> output) {
+	}
+
+	private volatile String lastError = "unbekannt";
+	private volatile String soundInfo = "";
+
+	public String soundInfo() {
+		return soundInfo;
+	}
+
+	/** Aufnahme-Varianten, beste zuerst. */
+	private List<Variant> variants() {
+		String bitrate = bitrateK + "k";
+		String bufsize = (bitrateK / 2) + "k";
+		List<String> nvenc = List.of("-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-b:v", bitrate,
+				"-maxrate", bitrate, "-bufsize", bufsize, "-g", "60", "-bf", "0", "-pix_fmt", "yuv420p");
+		List<String> x264 = List.of("-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", bitrate,
+				"-maxrate", bitrate, "-bufsize", bufsize, "-g", "60", "-bf", "0", "-pix_fmt", "yuv420p");
+		List<Variant> out = new ArrayList<>();
+		if (WINDOWS) {
+			List<String> dda = List.of("-f", "lavfi", "-i", "ddagrab=output_idx=" + monitor + ":framerate=30:draw_mouse=0");
+			List<String> ddaVf = List.of("-vf", "hwdownload,format=bgra," + SCALE);
+			// am sparsamsten: Bild bleibt komplett auf der Grafikkarte (aufnehmen, verkleinern, umwandeln)
+			List<String> ddaGpu = List.of("-f", "lavfi", "-i", "ddagrab=output_idx=" + monitor
+					+ ":framerate=30:draw_mouse=0,scale_d3d11=width=1280:height=720:format=nv12");
+			List<String> nvencGpu = List.of("-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr", "-b:v", bitrate,
+					"-maxrate", bitrate, "-bufsize", bufsize, "-g", "60", "-bf", "0");
+			out.add(new Variant("Grafikkarte", ddaGpu, nvencGpu));
+			out.add(new Variant("Grafikkarte+Prozessor", dda, concat(ddaVf, nvenc)));
+			out.add(new Variant("Prozessor", dda, concat(ddaVf, x264)));
+			out.add(new Variant("Prozessor, ganzer Desktop", List.of("-f", "gdigrab", "-framerate", "30", "-i", "desktop"),
+					concat(List.of("-vf", SCALE), x264)));
+		} else {
+			// Test (Linux): Testbild statt Monitor, weißer Blitz jede Sekunde (dazu ein Piep im Ton)
+			out.add(new Variant("Testbild", List.of("-re", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30"),
+					concat(List.of("-vf", "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t,3),0.1)'"), x264)));
+		}
+		return out;
+	}
+
+	private static List<String> concat(List<String> a, List<String> b) {
+		List<String> l = new ArrayList<>(a);
+		l.addAll(b);
+		return l;
+	}
+
+	/** Ton-Eingang für ffmpeg (Eingang Nr. 1); helper ist der Ton-Helfer-Befehl, wenn der Ton über stdin kommt. */
+	private List<String> audioInput(List<String> helper) {
+		if (helper != null) {
+			return List.of("-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0");
+		}
+		if (!WINDOWS && !sound.equals("off")) {
+			return List.of("-re", "-f", "lavfi", "-i", "aevalsrc='if(lt(mod(t,3),0.1),0.4*sin(2*PI*880*t),0)':s=48000:c=stereo");
+		}
+		return List.of("-re", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
+	}
+
+	/** Befehl für den Ton-Helfer, oder null (Ton aus / nicht Windows / Helfer fehlt). */
+	private List<String> helperCommand() {
+		if (sound.equals("off")) {
+			soundInfo = "ohne Ton";
+			return null;
+		}
+		java.nio.file.Path helper = Tools.audioHelper();
+		if (helper == null) {
+			soundInfo = WINDOWS ? T.t("ohne Ton (Ton-Helfer fehlt)") : T.t("Test-Piep");
+			return null;
+		}
+		String self = Long.toString(ProcessHandle.current().pid());
+		if (sound.startsWith("except:")) {
+			soundInfo = T.t("Ton: alles außer ") + sound.substring(7);
+			return List.of(helper.toString(), "except", self, sound.substring(7));
+		}
+		if (sound.startsWith("only:")) {
+			soundInfo = T.t("Ton: nur ") + sound.substring(5);
+			return List.of(helper.toString(), "only", self, sound.substring(5));
+		}
+		soundInfo = T.t("Ton: alles");
+		return List.of(helper.toString(), "all", self);
+	}
+
+	/** Startet ffmpeg (mit Ton-Helfer davor); true, wenn innerhalb von 6 s Daten kommen. */
+	private boolean startEncoder(Tools.Paths paths, Variant v) throws IOException, InterruptedException {
+		List<String> helper = helperCommand();
+		List<String> cmd = new ArrayList<>(List.of(paths.ffmpeg(), "-hide_banner", "-loglevel", "error"));
+		cmd.addAll(v.input);
+		cmd.addAll(audioInput(helper));
+		cmd.addAll(List.of("-map", "0:v:0", "-map", "1:a:0"));
+		cmd.addAll(v.output);
+		cmd.addAll(List.of("-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-max_interleave_delta", "500000",
+				"-f", "mpegts", "-muxdelay", "0", "-flush_packets", "1", "pipe:1"));
+		List<Process> started;
+		if (helper != null) {
+			started = ProcessBuilder.startPipeline(List.of(new ProcessBuilder(helper), new ProcessBuilder(cmd)));
+			logErrors(started.get(0), "ton");
+		} else {
+			started = List.of(new ProcessBuilder(cmd).start());
+		}
+		Process p = started.get(started.size() - 1);
+		logErrors(p, v.name);
+		// auf erste Daten warten
+		InputStream in = p.getInputStream();
+		long deadline = System.currentTimeMillis() + 6000;
+		while (System.currentTimeMillis() < deadline && !stopped) {
+			if (in.available() > 0) {
+				ffmpeg = p;
+				processes.addAll(started);
+				MultiMediaClient.LOGGER.info("Senden: Aufnahme läuft ({}, {}), Monitor {}", v.name, soundInfo, monitor);
+				return true;
+			}
+			if (!p.isAlive()) {
+				break;
+			}
+			Thread.sleep(50);
+		}
+		started.forEach(Process::destroyForcibly);
+		MultiMediaClient.LOGGER.info("Senden: Variante '{}' ging nicht: {}", v.name, lastError);
+		return false;
+	}
+
+	private void logErrors(Process p, String tag) {
+		Thread err = new Thread(() -> {
+			try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getErrorStream(), StandardCharsets.UTF_8))) {
+				String line;
+				while ((line = r.readLine()) != null) {
+					if (!line.isBlank()) {
+						if (!tag.equals("ton")) {
+							lastError = line.trim();
+						}
+						MultiMediaClient.LOGGER.info("[senden/{}] {}", tag, line.trim());
+					}
+				}
+			} catch (IOException ignored) {
+			}
+		}, "MultiMedia-TvErr");
+		err.setDaemon(true);
+		err.start();
+	}
+
+	/** Programme, die gerade Ton machen (für die Auswahl im Menü). */
+	public static List<String> audioPrograms() {
+		java.nio.file.Path helper = Tools.audioHelper();
+		if (helper == null) {
+			return WINDOWS ? List.of() : List.of("Discord.exe", "Spotify.exe", "chrome.exe"); // Linux: nur zum Testen des Menüs
+		}
+		try {
+			Process p = new ProcessBuilder(helper.toString(), "list", Long.toString(ProcessHandle.current().pid())).start();
+			p.getErrorStream().close();
+			String text = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+			p.waitFor(5, TimeUnit.SECONDS);
+			List<String> out = new ArrayList<>();
+			for (String line : text.split("\\R")) {
+				String name = line.trim();
+				if (name.matches("[^,|\\r\\n]{1,80}") && !out.contains(name)) {
+					out.add(name);
+				}
+			}
+			return out;
+		} catch (Exception e) {
+			return List.of();
+		}
+	}
+
+	/** ffmpeg-Ausgabe an alle Zuschauer verteilen. */
+	private void pump() throws IOException {
+		byte[] buf = new byte[32 * 1024];
+		try (InputStream in = ffmpeg.getInputStream()) {
+			int n;
+			while (!stopped && (n = in.read(buf)) > 0) {
+				byte[] chunk = java.util.Arrays.copyOf(buf, n);
+				for (int off = 0; off < n; off += P2p.PAYLOAD) {
+					int len = Math.min(P2p.PAYLOAD, n - off);
+					int seq = producedSeq;
+					byte[] pkt = P2p.packet(P2p.DATA, 0, 4 + len);
+					java.nio.ByteBuffer.wrap(pkt, P2p.HEADER, 4).putInt(seq);
+					System.arraycopy(buf, off, pkt, P2p.HEADER + 4, len);
+					ring[seq & (RING - 1)] = pkt;
+					producedSeq = seq + 1;
+				}
+				synchronized (newData) {
+					newData.notifyAll();
+				}
+				for (Viewer v : viewers) {
+					if (!v.queue.offer(chunk)) {
+						MultiMediaClient.LOGGER.info("Senden: Zuschauer {} kommt nicht hinterher – getrennt", v.name);
+						v.close();
+					}
+				}
+			}
+		}
+	}
+
+	private void acceptLoop() {
+		while (!stopped) {
+			try {
+				Socket s = server.accept();
+				Thread t = new Thread(() -> handshake(s), "MultiMedia-TvViewer");
+				t.setDaemon(true);
+				t.start();
+			} catch (IOException e) {
+				if (!stopped) {
+					MultiMediaClient.LOGGER.warn("Senden: Annehmen fehlgeschlagen: {}", e.toString());
+				}
+			}
+		}
+	}
+
+	private void handshake(Socket s) {
+		try {
+			s.setSoTimeout(5000);
+			s.setTcpNoDelay(true);
+			String line = readLine(s.getInputStream());
+			String expected = HELLO + Settings.tvToken();
+			if (line == null || !MessageDigest.isEqual(line.getBytes(StandardCharsets.UTF_8), expected.getBytes(StandardCharsets.UTF_8))) {
+				MultiMediaClient.LOGGER.info("Senden: Verbindung ohne gültigen Schlüssel von {} abgelehnt", s.getInetAddress());
+				s.close();
+				return;
+			}
+			s.setSoTimeout(0);
+			OutputStream out = s.getOutputStream();
+			out.write("OK\n".getBytes(StandardCharsets.US_ASCII));
+			out.flush();
+			Viewer v = new Viewer(s, s.getInetAddress().isLoopbackAddress());
+			viewers.add(v);
+			MultiMediaClient.LOGGER.info("Senden: Zuschauer verbunden ({}), jetzt {}", v.name, viewerCount());
+			v.writeLoop();
+		} catch (IOException e) {
+			try {
+				s.close();
+			} catch (IOException ignored) {
+			}
+		}
+	}
+
+	private static String readLine(InputStream in) throws IOException {
+		StringBuilder sb = new StringBuilder();
+		int c;
+		while ((c = in.read()) >= 0 && c != '\n') {
+			if (sb.length() > 200) {
+				return null;
+			}
+			sb.append((char) c);
+		}
+		return c < 0 ? null : sb.toString().trim();
+	}
+
+	public void stop() {
+		if (stopped) {
+			return;
+		}
+		stopped = true;
+		for (Process p : processes) {
+			p.descendants().forEach(ProcessHandle::destroyForcibly);
+			p.destroyForcibly();
+		}
+		try {
+			if (server != null) {
+				server.close();
+			}
+		} catch (IOException ignored) {
+		}
+		viewers.forEach(Viewer::close);
+		viewers.clear();
+		if (udp != null) {
+			for (UdpViewer v : udpViewers.values()) {
+				if (v.addr != null) {
+					udp.send(P2p.packet(P2p.BYE, v.session, 0), v.addr);
+				}
+			}
+			udpViewers.clear();
+			udp.close();
+		}
+		synchronized (newData) {
+			newData.notifyAll();
+		}
+		MultiMediaClient.LOGGER.info("Senden beendet");
+	}
+
+	// ------------------------------------------------------------------ Direkte Verbindungen (UDP)
+
+	/** Ein Freund, der direkt (über das gebohrte Loch) zuschaut. */
+	private static final class UdpViewer {
+		final String name;
+		final long session;
+		final List<InetSocketAddress> candidates;
+		volatile InetSocketAddress addr;
+		volatile long lastHeard = System.nanoTime();
+		int cursor = -1;
+		final java.util.concurrent.ConcurrentLinkedQueue<Integer> resend = new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+		UdpViewer(String name, long session, List<InetSocketAddress> candidates) {
+			this.name = name;
+			this.session = session;
+			this.candidates = candidates;
+		}
+	}
+
+	/** Anfrage eines Freundes (kam über den Chat, siehe TvSignal). */
+	static void handleRequest(String viewer, String token, long session, List<InetSocketAddress> candidates) {
+		if (!TvSignal.LOOPBACK && viewer.equalsIgnoreCase(net.minecraft.client.Minecraft.getInstance().getUser().getName())) {
+			return;
+		}
+		if (!MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), Settings.tvToken().getBytes(StandardCharsets.UTF_8))) {
+			MultiMediaClient.LOGGER.info("Senden: Anfrage von {} mit alter/falscher Einladung", viewer);
+			TvSignal.answer(viewer, session, "bad", List.of());
+			return;
+		}
+		TvSender s = current;
+		if (s == null || s.stopped || s.udp == null) {
+			WAITING.add(viewer);
+			TvSignal.answer(viewer, session, "off", List.of());
+			return;
+		}
+		s.accept(viewer, session, candidates);
+	}
+
+	private void accept(String viewer, long session, List<InetSocketAddress> candidates) {
+		udpViewers.values().removeIf(v -> v.name.equalsIgnoreCase(viewer)); // alte Verbindung desselben Freundes ersetzen
+		UdpViewer v = new UdpViewer(viewer, session, candidates);
+		udpViewers.put(session, v);
+		List<InetSocketAddress> mine = new ArrayList<>();
+		P2p.StunResult r = stun;
+		if (r != null && r.mapped() != null) {
+			mine.add(r.mapped());
+		}
+		mine.addAll(P2p.localCandidates(udp.port()));
+		TvSignal.answer(viewer, session, "ok", mine);
+		MultiMediaClient.LOGGER.info("Senden: {} möchte zuschauen – bohre Loch (meine Adressen {}, seine {})", viewer, mine.size(), candidates.size());
+		// eine Weile an alle bekannten Adressen klopfen, bis eine antwortet
+		Thread t = new Thread(() -> {
+			byte[] punch = P2p.packet(P2p.PUNCH, session, 0);
+			long end = System.currentTimeMillis() + 15_000;
+			while (!stopped && v.addr == null && System.currentTimeMillis() < end && udpViewers.get(session) == v) {
+				for (InetSocketAddress c : candidates) {
+					udp.send(punch, c);
+				}
+				P2p.sleep(100);
+			}
+			if (v.addr == null && udpViewers.remove(session) != null && !stopped) {
+				MultiMediaClient.LOGGER.info("Senden: Direkte Verbindung zu {} hat nicht geklappt", viewer);
+			}
+		}, "MultiMedia-TvPunch");
+		t.setDaemon(true);
+		t.start();
+	}
+
+	private void onUdp(byte[] d, InetSocketAddress from) {
+		UdpViewer v = udpViewers.get(P2p.session(d));
+		if (v == null) {
+			return;
+		}
+		if (v.addr == null) {
+			v.addr = from; // Loch ist offen
+			MultiMediaClient.LOGGER.info("Senden: {} ist direkt verbunden ({}), jetzt {} Zuschauer", v.name, P2p.format(from), viewerCount());
+		} else if (!v.addr.equals(from)) {
+			if (d[1] != P2p.HEARTBEAT) {
+				return;
+			}
+			v.addr = from; // Router hat den Port gewechselt
+		}
+		v.lastHeard = System.nanoTime();
+		switch (d[1]) {
+			case P2p.PUNCH -> udp.send(P2p.packet(P2p.PUNCH, v.session, 0), from);
+			case P2p.NACK -> {
+				java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(d, P2p.HEADER, d.length - P2p.HEADER);
+				while (bb.remaining() >= 4 && v.resend.size() < 2000) {
+					v.resend.add(bb.getInt());
+				}
+				synchronized (newData) {
+					newData.notifyAll();
+				}
+			}
+			case P2p.BYE -> {
+				udpViewers.remove(v.session);
+				MultiMediaClient.LOGGER.info("Senden: {} schaut nicht mehr zu, jetzt {}", v.name, viewerCount());
+			}
+			default -> {
+			}
+		}
+	}
+
+	/** Verteilt die Pakete an alle direkt verbundenen Freunde – mit Nachsenden und gleichmäßigem Tempo. */
+	private void pacerLoop() {
+		long budgetAt = System.nanoTime();
+		double budget = 0;
+		while (!stopped) {
+			boolean sent = false;
+			long now = System.nanoTime();
+			budget = Math.min(MAX_UPLOAD * 0.05, budget + (now - budgetAt) / 1e9 * MAX_UPLOAD);
+			budgetAt = now;
+			for (UdpViewer v : udpViewers.values()) {
+				if (v.addr == null) {
+					continue;
+				}
+				if (now - v.lastHeard > 10_000_000_000L) {
+					udpViewers.remove(v.session);
+					MultiMediaClient.LOGGER.info("Senden: {} antwortet nicht mehr – getrennt, jetzt {}", v.name, viewerCount());
+					continue;
+				}
+				int produced = producedSeq;
+				if (v.cursor < 0 || produced - v.cursor > RING / 2) {
+					v.cursor = produced; // neu dabei oder viel zu weit hinten: live einsteigen
+				}
+				// erst Nachforderungen, dann Neues (ein paar Pakete je Zuschauer pro Runde, damit alle drankommen)
+				for (int k = 0; k < 8 && budget > 0; k++) {
+					Integer again = v.resend.poll();
+					int seq;
+					if (again != null) {
+						seq = again;
+						if (produced - seq > RING - 16 || produced - seq <= 0) {
+							continue; // zu alt oder gibt's nicht
+						}
+					} else if (v.cursor - produced < 0) {
+						seq = v.cursor++;
+					} else {
+						break;
+					}
+					byte[] pkt = ring[seq & (RING - 1)];
+					if (pkt == null) {
+						continue;
+					}
+					byte[] out = pkt.clone();
+					java.nio.ByteBuffer.wrap(out, 2, 8).putLong(v.session);
+					udp.send(out, v.addr);
+					budget -= out.length + 28;
+					sent = true;
+				}
+			}
+			if (!sent || budget <= 0) {
+				synchronized (newData) {
+					try {
+						newData.wait(budget <= 0 ? 2 : 20);
+					} catch (InterruptedException e) {
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	/** Ein Zuschauer mit eigenem Puffer und Schreib-Thread. */
+	private final class Viewer {
+		final Socket socket;
+		final boolean local;
+		final String name;
+		final BlockingQueue<byte[]> queue = new ArrayBlockingQueue<>(VIEWER_QUEUE);
+		volatile boolean closed;
+
+		Viewer(Socket socket, boolean local) {
+			this.socket = socket;
+			this.local = local;
+			this.name = local ? "dieser PC" : socket.getInetAddress().getHostAddress();
+		}
+
+		void writeLoop() {
+			try (OutputStream out = socket.getOutputStream()) {
+				while (!closed && !stopped) {
+					byte[] chunk = queue.poll(500, TimeUnit.MILLISECONDS);
+					if (chunk != null) {
+						out.write(chunk);
+					}
+				}
+			} catch (IOException | InterruptedException ignored) {
+				// Zuschauer weg
+			} finally {
+				close();
+				viewers.remove(this);
+				if (!stopped) {
+					MultiMediaClient.LOGGER.info("Senden: Zuschauer getrennt ({}), jetzt {}", name, viewerCount());
+				}
+			}
+		}
+
+		void close() {
+			closed = true;
+			try {
+				socket.close();
+			} catch (IOException ignored) {
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ Vorschau der Monitore (fürs Menü)
+
+	/** Ein kleines Vorschaubild (PNG) pro Monitor; leer, wenn keine Aufnahme möglich ist. */
+	public static List<byte[]> monitorPreviews(Tools.Paths paths) {
+		List<byte[]> out = new ArrayList<>();
+		for (int i = 0; i < 4; i++) {
+			List<String> cmd = new ArrayList<>(List.of(paths.ffmpeg(), "-hide_banner", "-loglevel", "error"));
+			if (WINDOWS) {
+				cmd.addAll(List.of("-f", "lavfi", "-i", "ddagrab=output_idx=" + i + ":framerate=5:draw_mouse=0",
+						"-vf", "hwdownload,format=bgra,scale=256:144:force_original_aspect_ratio=decrease,pad=256:144:(ow-iw)/2:(oh-ih)/2"));
+			} else {
+				if (i >= 2) {
+					break;
+				}
+				cmd.addAll(List.of("-f", "lavfi", "-i", (i == 0 ? "testsrc2" : "mandelbrot") + "=size=256x144:rate=5"));
+			}
+			cmd.addAll(List.of("-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"));
+			try {
+				Process p = new ProcessBuilder(cmd).redirectErrorStream(false).start();
+				p.getErrorStream().close();
+				byte[] png = p.getInputStream().readAllBytes();
+				p.waitFor(5, TimeUnit.SECONDS);
+				if (png.length < 100) {
+					break; // kein weiterer Monitor
+				}
+				out.add(png);
+			} catch (Exception e) {
+				break;
+			}
+		}
+		return out;
+	}
+}

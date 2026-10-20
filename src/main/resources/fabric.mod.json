@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "multimedia",
+	"version": "${version}",
+	"name": "MultiMedia",
+	"description": "YouTube on jukeboxes and block-wall screens, in sync for everyone with the mod - plus live streaming of your own monitor onto in-game screens. Client-side only.",
+	"authors": ["Schmodas"],
+	"license": "MIT",
+	"contact": {
+		"homepage": "https://modrinth.com/mod/multimedia-cinema"
+	},
+	"icon": "assets/multimedia/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["de.schmodas.multimedia.MultiMediaClient"],
+		"modmenu": ["de.schmodas.multimedia.ModMenuIntegration"]
+	},
+	"mixins": [
+		{ "config": "multimedia.client.mixins.json", "environment": "client" }
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"breaks": {
+		"discstream": "*"
+	},
+	"suggests": {
+		"modmenu": "*"
+	}
+}
