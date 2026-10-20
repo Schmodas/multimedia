@@ -1,0 +1,67 @@
+# Publishing a GitHub release builds the mod from this exact source and uploads
+# the resulting jar to Modrinth and to the GitHub release. No files are uploaded by hand.
+name: release
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+      - name: Build audio helper from native/mmaudio.cpp
+        run: ./scripts/build-audio-helper.sh
+      - name: Build mod
+        run: ./gradlew build --no-daemon
+      - name: Find jar
+        id: jar
+        run: |
+          version=$(grep '^version=' gradle.properties | cut -d= -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then echo "Tag $GITHUB_REF_NAME does not match version=$version"; exit 1; fi
+          jar="build/libs/multimedia-$version.jar"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+          sha256sum "$jar" src/client/resources/multimedia/mmaudio.exe
+      - name: Attach jar to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.jar.outputs.jar }}" --clobber
+      - name: Publish to Modrinth
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          CHANGELOG: ${{ github.event.release.body }}
+          VERSION: ${{ steps.jar.outputs.version }}
+          JAR: ${{ steps.jar.outputs.jar }}
+        run: |
+          data=$(jq -n --arg v "$VERSION" --arg c "$CHANGELOG" --arg f "$(basename "$JAR")" '{
+            project_id: "DS5qgGwY",
+            name: ("MultiMedia " + $v),
+            version_number: $v,
+            changelog: $c,
+            game_versions: ["26.3"],
+            loaders: ["fabric"],
+            version_type: "release",
+            featured: true,
+            dependencies: [
+              {project_id: "P7dR8mSH", dependency_type: "required"},
+              {project_id: "mOgUt4GM", dependency_type: "optional"}
+            ],
+            file_parts: ["file"],
+            primary_file: "file"
+          }')
+          curl --fail-with-body -sS -X POST https://api.modrinth.com/v2/version \
+            -H "Authorization: $MODRINTH_TOKEN" \
+            -H "User-Agent: Schmodas/multimedia (github.com/Schmodas/multimedia)" \
+            -F "data=$data" \
+            -F "file=@$JAR;filename=$(basename "$JAR")"

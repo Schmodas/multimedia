@@ -28,14 +28,17 @@ Client-side only: the server doesn't need the mod, and players without it simply
 ## Building
 
 ```
+./scripts/build-audio-helper.sh   # Windows audio helper from native/mmaudio.cpp (needs MinGW-w64)
 ./gradlew build
 ```
 
-The jar ends up in `build/libs/`. The small Windows audio helper (`native/mmaudio.cpp`, captures the sound of one program) is prebuilt in `src/client/resources/multimedia/mmaudio.exe`. To rebuild it with MinGW:
+The jar ends up in `build/libs/`. Without the first step the mod still builds, but screen streaming has no sound on Windows.
 
-```
-x86_64-w64-mingw32-g++ -O2 -static -municode native/mmaudio.cpp -o mmaudio.exe -lole32 -luuid -lmmdevapi -lwinmm
-```
+The repository contains **no prebuilt binaries**. The small audio helper (`native/mmaudio.cpp`, captures the sound of one program for screen streaming) is compiled from source by the script above; the build is reproducible (no timestamp in the exe).
+
+## Releases
+
+Every release on Modrinth is built and published by GitHub Actions ([`release.yml`](.github/workflows/release.yml)) from the tagged source in this repository – nothing is uploaded by hand. The build log shows the SHA-256 of the jar and of the audio helper, so you can compare them with the file on Modrinth.
 
 ## License
 

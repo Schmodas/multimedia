@@ -1,0 +1,25 @@
+# Builds the mod on every push: audio helper from source, then the jar.
+name: build
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install MinGW-w64
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64
+      - name: Build audio helper from native/mmaudio.cpp
+        run: ./scripts/build-audio-helper.sh
+      - name: Build mod
+        run: ./gradlew build --no-daemon
+      - name: Checksums
+        run: sha256sum build/libs/*.jar src/client/resources/multimedia/mmaudio.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multimedia
+          path: build/libs/*.jar
