@@ -63,5 +63,5 @@ jobs:
           curl --fail-with-body -sS -X POST https://api.modrinth.com/v2/version \
             -H "Authorization: $MODRINTH_TOKEN" \
             -H "User-Agent: Schmodas/multimedia (github.com/Schmodas/multimedia)" \
-            -F "data=$data" \
+            --form-string "data=$data" \
             -F "file=@$JAR;filename=$(basename "$JAR")"
