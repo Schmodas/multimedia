@@ -65,6 +65,7 @@ public class MultiMediaClient implements ClientModInitializer {
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(JukeboxVisuals::tick);
 		ClientTickEvents.END_CLIENT_TICK.register(ScreenManager::tick);
+		ClientTickEvents.END_CLIENT_TICK.register(LeanView::tick);
 		net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents.COLLECT_SUBMITS.register(ScreenManager::render);
 	}
 

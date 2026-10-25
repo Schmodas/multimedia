@@ -38,6 +38,7 @@ public class SettingsScreen extends OptionsSubScreen {
 						v -> Component.translatable(KEY + "blocks", v * 8)),
 				notes(),
 				bool("now_playing", Settings.nowPlaying(), Settings::setNowPlaying),
+				bool("lean_view", Settings.leanView(), Settings::setLeanView),
 				bool("chat", Settings.chatMessages(), Settings::setChatMessages));
 
 		// ---------------------------------------------------------------- Klang

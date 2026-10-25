@@ -63,7 +63,7 @@ public final class JukeboxVisuals {
 			}
 			seen.add(p.pos());
 			double top = topOf(level, p.pos());
-			if (!Settings.hideTitles()) {
+			if (!Settings.hideTitles() && !p.pos().equals(LeanView.jukebox())) { // in der Jukebox-Ansicht steht der Titel oben
 				updateLabel(level, p.pos(), labelText(p), top);
 			}
 			if (!mc.isPaused() && Settings.notes() > 0 && Vec3.atCenterOf(p.pos()).distanceToSqr(me) < NOTE_DISTANCE * NOTE_DISTANCE) {
@@ -91,7 +91,7 @@ public final class JukeboxVisuals {
 		Iterator<Map.Entry<BlockPos, Label>> it = LABELS.entrySet().iterator();
 		while (it.hasNext()) {
 			Map.Entry<BlockPos, Label> e = it.next();
-			if (!seen.contains(e.getKey()) || Settings.hideTitles()) {
+			if (!seen.contains(e.getKey()) || Settings.hideTitles() || e.getKey().equals(LeanView.jukebox())) {
 				remove(level, e.getValue());
 				it.remove();
 			}

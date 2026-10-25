@@ -27,6 +27,8 @@ public final class Settings {
 		boolean nowPlaying = true;
 		boolean chatMessages = true;
 		boolean reverb = true;
+		/** Rechtsklick auf Jukebox: Kamera lehnt sich drüber, Bedienfeld. */
+		boolean leanView = true;
 		/** Videos auf Leinwänden anzeigen. */
 		boolean screens = true;
 		/** Helligkeit der Leinwand in Prozent (Shader machen leuchtende Flächen oft zu hell). */
@@ -212,6 +214,15 @@ public final class Settings {
 
 	public static void setScreenBrightness(int percent) {
 		data.screenBrightness = Math.max(10, Math.min(100, percent));
+		save();
+	}
+
+	public static boolean leanView() {
+		return data.leanView;
+	}
+
+	public static void setLeanView(boolean value) {
+		data.leanView = value;
 		save();
 	}
 

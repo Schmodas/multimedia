@@ -148,6 +148,28 @@ public abstract class SignEditScreenMixin extends Screen {
 	@org.spongepowered.asm.mixin.Unique
 	private int multimedia$warnTick;
 
+	/** Aus der Jukebox-Ansicht: Aktion (Pause, Skip …), die dieser Editor gleich unsichtbar ausführt. */
+	@org.spongepowered.asm.mixin.Unique
+	private String multimedia$leanAction;
+
+	@Inject(method = "tick", at = @At("HEAD"), cancellable = true)
+	private void multimedia$leanTick(CallbackInfo ci) {
+		if (multimedia$leanAction != null) {
+			String a = multimedia$leanAction;
+			multimedia$leanAction = null;
+			multimedia$setState(a);
+			onDone();
+			ci.cancel();
+		}
+	}
+
+	@Inject(method = "extractRenderState", at = @At("HEAD"), cancellable = true)
+	private void multimedia$leanHide(net.minecraft.client.gui.GuiGraphicsExtractor g, int mouseX, int mouseY, float a, CallbackInfo ci) {
+		if (multimedia$leanAction != null) {
+			ci.cancel(); // Editor nur kurz im Hintergrund, nicht zeigen
+		}
+	}
+
 	@Inject(method = "tick", at = @At("TAIL"))
 	private void multimedia$checkChannel(CallbackInfo ci) {
 		if (multimedia$channelWarn == null || multimedia$warnTick++ % 10 != 0) {
@@ -217,6 +239,9 @@ public abstract class SignEditScreenMixin extends Screen {
 
 	@Inject(method = "init", at = @At("TAIL"))
 	private void multimedia$controls(CallbackInfo ci) {
+		if (multimedia$leanAction == null) {
+			multimedia$leanAction = de.schmodas.multimedia.LeanView.takeSignAction(this.sign.getBlockPos());
+		}
 		multimedia$channelWarn = Button.builder(Component.literal(""), b -> multimedia$freeChannel())
 				.bounds(this.width / 2 - 150, 14, 300, 20).tooltip(Tooltip.create(Component.literal(
 						T.t("Zwei Haupt-Quellen mit demselben Kanal: Lautsprecher spielen die nähere. Ein eigener Kanal vermeidet Durcheinander."))))
