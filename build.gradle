@@ -84,3 +84,14 @@ publishing {
 		// retrieving dependencies.
 	}
 }
+
+// Test im Spiel: startet Minecraft, baut eine Jukebox auf und macht Screenshots (./gradlew runClientGameTest)
+fabricApi {
+	configureTests {
+		createSourceSet = true
+		modId = "multimedia-test"
+		enableGameTests = false
+		enableClientGameTests = true
+		eula = true
+	}
+}
