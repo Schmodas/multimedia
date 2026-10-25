@@ -182,6 +182,8 @@ public final class LeanPanels {
 		if (u < 0 || u >= 1 || v < 0 || v > 1) {
 			return -1;
 		}
-		return (int) (u * VISIBLE);
+		// Felder liegen wie in der normalen Hotbar alle 20 Pixel, mit 1 Pixel Rand links
+		double px = u * LeanRender.W;
+		return (int) Math.max(0, Math.min(VISIBLE - 1, Math.floor((px - 1) / 20)));
 	}
 }
