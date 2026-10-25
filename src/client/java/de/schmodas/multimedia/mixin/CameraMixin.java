@@ -2,7 +2,6 @@ package de.schmodas.multimedia.mixin;
 
 import de.schmodas.multimedia.LeanView;
 import net.minecraft.client.Camera;
-import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -25,15 +24,12 @@ public abstract class CameraMixin {
 
 	@Inject(method = "alignWithEntity", at = @At("TAIL"))
 	private void multimedia$lean(float partialTicks, CallbackInfo ci) {
-		float t = LeanView.blend();
-		Vec3 target = LeanView.cameraPos();
-		if (t <= 0 || target == null) {
+		float[] pos = new float[3];
+		float[] rot = LeanView.apply(this.position, this.yRot, this.xRot, pos);
+		if (rot == null) {
 			return;
 		}
-		Vec3 from = this.position;
-		float yaw = this.yRot + Mth.wrapDegrees(LeanView.cameraYaw() - this.yRot) * t;
-		float pitch = Mth.lerp(t, this.xRot, LeanView.cameraPitch());
-		setRotation(yaw, pitch);
-		setPosition(from.lerp(target, t));
+		setRotation(rot[0], rot[1]);
+		setPosition(new Vec3(pos[0], pos[1], pos[2]));
 	}
 }

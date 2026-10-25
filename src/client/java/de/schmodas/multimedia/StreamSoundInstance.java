@@ -56,7 +56,7 @@ public class StreamSoundInstance extends AbstractSoundInstance {
 		// gemeinsamer Stream für alle Jukeboxen mit demselben Link
 		return StreamHub.openTap(playback, stereo, MultiMediaClient::info,
 				msg -> {
-					MultiMediaClient.error(T.t("Stream fehlgeschlagen: ") + msg);
+					MultiMediaClient.error(T.t("Stream fehlgeschlagen: ") + YtAudioStream.friendly(msg));
 					Consumer<String> c = onError;
 					if (c != null) {
 						Minecraft.getInstance().execute(() -> c.accept(msg));

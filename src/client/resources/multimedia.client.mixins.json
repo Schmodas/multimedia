@@ -12,7 +12,9 @@
 		"ChannelMixin",
 		"LibraryMixin",
 		"CameraMixin",
-		"GameModeMixin"
+		"GameModeMixin",
+		"HudMixin",
+		"HandsMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

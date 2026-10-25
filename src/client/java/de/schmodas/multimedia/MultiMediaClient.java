@@ -359,7 +359,15 @@ public class MultiMediaClient implements ClientModInitializer {
 		send(prefix().append(Component.literal(msg).withStyle(ChatFormatting.GRAY)));
 	}
 
+	private static final java.util.Map<String, Long> LAST_ERRORS = new java.util.concurrent.ConcurrentHashMap<>();
+
 	public static void error(String msg) {
+		// dieselbe Meldung nicht immer wieder (z.B. wenn mehrere Jukeboxen denselben Fehler haben)
+		long now = System.currentTimeMillis();
+		Long last = LAST_ERRORS.put(msg, now);
+		if (last != null && now - last < 60_000) {
+			return;
+		}
 		send(prefix().append(Component.literal(msg).withStyle(ChatFormatting.RED)));
 	}
 

@@ -87,7 +87,9 @@ public final class Tools {
 
 	/**
 	 * yt-dlp höchstens einmal am Tag still aktualisieren (YouTube ändert öfter etwas, dann gehen alte Versionen
-	 * nicht mehr). Läuft im Hintergrund; klappt es nicht, bleibt einfach die alte Version.
+	 * nicht mehr). Wir nutzen die ausgepackte Fassung (yt-dlp_win.zip): Die muss sich nicht bei jedem Start erst in
+	 * den Temp-Ordner entpacken (das scheitert z.B. bei voller Festplatte oder wenn der Virenschutz dazwischengeht)
+	 * und startet schneller. Sie aktualisiert sich nicht selbst – das machen wir hier.
 	 */
 	private static void maybeUpdateYtDlp(Paths paths) {
 		if (updateChecked || !WINDOWS) {
@@ -96,23 +98,19 @@ public final class Tools {
 		updateChecked = true;
 		Path stamp = BIN.resolve("yt-dlp.updated");
 		try {
-			if (Files.exists(stamp) && System.currentTimeMillis() - Files.getLastModifiedTime(stamp).toMillis() < 20 * 3600_000L) {
+			if (onedirExe() != null && Files.exists(stamp)
+					&& System.currentTimeMillis() - Files.getLastModifiedTime(stamp).toMillis() < 20 * 3600_000L) {
 				return;
 			}
 		} catch (IOException ignored) {
 		}
 		Thread t = new Thread(() -> {
 			try {
-				Process p = new ProcessBuilder(paths.ytDlp(), "-U").redirectErrorStream(true).start();
-				String out = readQuiet(p.getInputStream());
-				boolean done = p.waitFor(120, java.util.concurrent.TimeUnit.SECONDS);
-				if (!done) {
-					p.destroyForcibly();
-				}
-				Files.writeString(stamp, out);
-				String last = lastLine(out.trim(), "");
-				MultiMediaClient.LOGGER.info("yt-dlp-Update: {}", last);
-				if (out.contains("Updated yt-dlp")) {
+				boolean had = onedirExe() != null;
+				String result = updateOnedir();
+				Files.writeString(stamp, result);
+				MultiMediaClient.LOGGER.info("yt-dlp-Update: {}", result);
+				if (had && result.startsWith("updated")) {
 					MultiMediaClient.info(T.t("YouTube-Werkzeug (yt-dlp) wurde aktualisiert."));
 				}
 			} catch (Exception e) {
@@ -121,6 +119,101 @@ public final class Tools {
 		}, "MultiMedia-YtDlpUpdate");
 		t.setDaemon(true);
 		t.start();
+	}
+
+	private static final String YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest";
+	private static final String YTDLP_ZIP = "https://github.com/yt-dlp/yt-dlp/releases/download/%s/yt-dlp_win.zip";
+
+	/** yt-dlp.exe der ausgepackten Fassung (Ordner steht in yt-dlp.current), oder null. */
+	private static Path onedirExe() {
+		try {
+			Path current = BIN.resolve("yt-dlp.current");
+			if (!Files.exists(current)) {
+				return null;
+			}
+			Path dir = BIN.resolve(Files.readString(current).trim());
+			try (var walk = Files.walk(dir, 3)) {
+				return walk.filter(p -> p.getFileName().toString().equalsIgnoreCase("yt-dlp.exe")).findFirst().orElse(null);
+			}
+		} catch (IOException e) {
+			return null;
+		}
+	}
+
+	/** Neueste Version laden, falls nicht schon da. Liefert "updated <tag>" oder "current <tag>". */
+	private static synchronized String updateOnedir() throws IOException, InterruptedException {
+		HttpClient noRedirect = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
+				.connectTimeout(Duration.ofSeconds(20)).build();
+		HttpResponse<Void> head = noRedirect.send(HttpRequest.newBuilder(URI.create(YTDLP_LATEST))
+				.header("User-Agent", "MultiMedia-Minecraft-Mod").method("HEAD", HttpRequest.BodyPublishers.noBody()).build(),
+				HttpResponse.BodyHandlers.discarding());
+		String location = head.headers().firstValue("location").orElse("");
+		String tag = location.substring(location.lastIndexOf('/') + 1);
+		if (!tag.matches("[0-9][0-9.]{5,30}")) {
+			throw new IOException("Version nicht erkannt: " + location);
+		}
+		String name = "yt-dlp-" + tag;
+		Path current = BIN.resolve("yt-dlp.current");
+		if (onedirExe() != null && Files.exists(current) && Files.readString(current).trim().equals(name)) {
+			return "current " + tag;
+		}
+		Files.createDirectories(BIN);
+		Path part = BIN.resolve(name + ".part");
+		deleteTree(part);
+		HttpClient http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS)
+				.connectTimeout(Duration.ofSeconds(20)).build();
+		HttpResponse<InputStream> res = http.send(HttpRequest.newBuilder(URI.create(String.format(YTDLP_ZIP, tag)))
+				.header("User-Agent", "MultiMedia-Minecraft-Mod").GET().build(), HttpResponse.BodyHandlers.ofInputStream());
+		if (res.statusCode() != 200) {
+			res.body().close();
+			throw new IOException(T.t("Download fehlgeschlagen (") + res.statusCode() + ")");
+		}
+		try (ZipInputStream zip = new ZipInputStream(res.body())) {
+			ZipEntry e;
+			while ((e = zip.getNextEntry()) != null) {
+				Path out = part.resolve(e.getName()).normalize();
+				if (!out.startsWith(part)) {
+					continue; // keine Pfade aus dem Ordner heraus
+				}
+				if (e.isDirectory()) {
+					Files.createDirectories(out);
+				} else {
+					Files.createDirectories(out.getParent());
+					Files.copy(zip, out, StandardCopyOption.REPLACE_EXISTING);
+				}
+			}
+		}
+		Path dir = BIN.resolve(name);
+		deleteTree(dir);
+		Files.move(part, dir);
+		Files.writeString(current, name);
+		if (onedirExe() == null) {
+			throw new IOException("yt-dlp.exe" + T.t(" nicht im Download gefunden"));
+		}
+		// alte Fassungen aufräumen (was gerade benutzt wird, lässt Windows nicht löschen – dann eben nächstes Mal)
+		try (var list = Files.list(BIN)) {
+			for (Path p : list.toList()) {
+				String n = p.getFileName().toString();
+				if ((n.startsWith("yt-dlp-") && !n.equals(name)) || n.equals("yt-dlp.exe")) {
+					try {
+						deleteTree(p);
+					} catch (IOException ignored) {
+					}
+				}
+			}
+		}
+		return "updated " + tag;
+	}
+
+	private static void deleteTree(Path p) throws IOException {
+		if (!Files.exists(p)) {
+			return;
+		}
+		try (var walk = Files.walk(p)) {
+			for (Path x : walk.sorted(java.util.Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(x);
+			}
+		}
 	}
 
 	/** Ton-Helfer fürs Senden (nur Windows, steckt in der Mod): bei Bedarf entpacken. Null, wenn nicht verfügbar. */
@@ -151,7 +244,10 @@ public final class Tools {
 			// Linux/macOS: Programme müssen installiert sein (Paketmanager).
 			return new Paths("yt-dlp", "ffmpeg", "deno");
 		}
-		Path y = BIN.resolve("yt-dlp.exe");
+		Path y = onedirExe();
+		if (y == null) {
+			y = BIN.resolve("yt-dlp.exe"); // alte Fassung (eine Datei), bis die ausgepackte da ist
+		}
 		Path f = BIN.resolve("ffmpeg.exe");
 		Path d = BIN.resolve("deno.exe");
 		if (Files.exists(y) && Files.exists(f) && Files.exists(d)) {
@@ -167,10 +263,17 @@ public final class Tools {
 				.connectTimeout(Duration.ofSeconds(20))
 				.build();
 
-		Path ytDlp = BIN.resolve("yt-dlp.exe");
-		if (!Files.exists(ytDlp)) {
-			status.accept(T.t("Lade yt-dlp herunter (ca. 18 MB) …"));
-			download(http, YTDLP_URL, ytDlp, null);
+		Path ytDlp = onedirExe();
+		if (ytDlp == null) {
+			status.accept(T.t("Lade yt-dlp herunter (ca. 25 MB) …"));
+			try {
+				updateOnedir();
+				Files.writeString(BIN.resolve("yt-dlp.updated"), "installed");
+			} catch (IOException e) {
+				// Notlösung: die einzelne Datei
+				download(http, YTDLP_URL, BIN.resolve("yt-dlp.exe"), null);
+			}
+			ytDlp = onedirExe() != null ? onedirExe() : BIN.resolve("yt-dlp.exe");
 		}
 		Path deno = BIN.resolve("deno.exe");
 		if (!Files.exists(deno)) {
@@ -227,8 +330,14 @@ public final class Tools {
 
 	/** Aktualisiert yt-dlp (hilft, wenn YouTube etwas geändert hat). */
 	public static CompletableFuture<String> updateYtDlp(Consumer<String> status) {
-		return ensure(status).thenApply(p -> {
+		return ensure(status).thenApplyAsync(p -> {
 			try {
+				if (WINDOWS) {
+					String r = updateOnedir();
+					Files.writeString(BIN.resolve("yt-dlp.updated"), r);
+					String tag = r.substring(r.indexOf(' ') + 1);
+					return r.startsWith("updated") ? T.t("yt-dlp aktualisiert auf ") + tag : T.t("yt-dlp ist aktuell (") + tag + ")";
+				}
 				Process proc = new ProcessBuilder(p.ytDlp(), "-U").redirectErrorStream(true).start();
 				String out = new String(proc.getInputStream().readAllBytes()).trim();
 				proc.waitFor();

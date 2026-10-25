@@ -357,6 +357,10 @@ public final class YtAudioStream implements AudioStream {
 		if (all.contains("video unavailable") || all.contains("has been removed") || all.contains("does not exist")) {
 			return T.t("Video gibt es nicht (mehr)");
 		}
+		if (all.contains("no space left") || all.contains("failed to extract entry") || all.contains("[pyi-")
+				|| all.contains("not enough space") || all.contains("disk full")) {
+			return T.t("Festplatte voll – yt-dlp kann nicht starten (Platz auf C: freimachen)");
+		}
 		if (all.contains("live event will begin") || all.contains("premieres in")) {
 			return T.t("Livestream hat noch nicht angefangen");
 		}

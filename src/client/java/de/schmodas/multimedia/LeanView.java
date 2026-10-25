@@ -24,20 +24,14 @@ import net.minecraft.world.phys.Vec3;
  * Alles, was die Welt verändert, läuft über normale Klicks (wie von Hand) – für den Server sieht es aus wie immer.
  */
 public final class LeanView {
-	private static final long IN_NANOS = 550_000_000L;
-	private static final long OUT_NANOS = 450_000_000L;
 	/** Weiter weg als das (Blöcke) = Ansicht schließen. */
 	private static final double MAX_DISTANCE = 6.0;
 
 	private static BlockPos jukebox;
-	private static Vec3 camPos;
-	private static float camYaw;
-	private static float camPitch;
 	private static long startNanos;
 	private static boolean closing;
 	private static long closeNanos;
 	private static float closeFrom;
-	private static boolean savedHideGui;
 	/** Unsere eigenen Klicks dürfen durch (sonst würde die Ansicht sich selbst wieder öffnen). */
 	private static boolean bypass;
 	/** Aktion, die der Schild-Editor gleich unsichtbar ausführen soll ("pause", "restart", …); null = normal bearbeiten. */
@@ -71,14 +65,10 @@ public final class LeanView {
 		if (player == null || mc.level == null) {
 			return;
 		}
-		if (jukebox == null) {
-			savedHideGui = mc.gui.hud.isHidden();
-		}
 		jukebox = pos.immutable();
 		computeTarget(mc.level, player.getEyePosition(), player.getYRot());
 		startNanos = System.nanoTime();
 		closing = false;
-		setHudHidden(mc, true);
 		mc.gui.setScreen(new LeanScreen(jukebox));
 	}
 
@@ -88,6 +78,7 @@ public final class LeanView {
 			return;
 		}
 		closeFrom = progressIn();
+		inNanos = Math.max(inNanos, 400_000_000L);
 		closing = true;
 		closeNanos = System.nanoTime();
 		pendingInsertSlot = -1;
@@ -97,15 +88,8 @@ public final class LeanView {
 		Minecraft mc = Minecraft.getInstance();
 		jukebox = null;
 		closing = false;
-		setHudHidden(mc, savedHideGui);
 		if (mc.gui.screen() instanceof LeanScreen) {
 			mc.gui.setScreen(null);
-		}
-	}
-
-	private static void setHudHidden(Minecraft mc, boolean hidden) {
-		if (mc.gui.hud.isHidden() != hidden) {
-			mc.gui.hud.toggle();
 		}
 	}
 
@@ -147,37 +131,83 @@ public final class LeanView {
 	}
 
 	// ------------------------------------------------------------------ Kamera
+	//
+	// Die Kamera "geht" auf Augenhöhe zur Jukebox (mit leichtem Wippen wie beim Laufen) und beugt sich am Ende
+	// darüber (bzw. schaut bei Decken-Jukeboxen nach oben). Von der Seite, von der man kommt.
 
-	/** Wie weit die Kamera schon bei der Jukebox ist (0 = beim Spieler, 1 = bei der Jukebox), schon geglättet. */
-	public static float blend() {
+	/** Gesamtfortschritt 0..1 (linear, ohne Glättung). */
+	private static float raw() {
 		if (jukebox == null) {
 			return 0;
 		}
-		float t = closing ? closeFrom * (1 - progressOut()) : progressIn();
+		return closing ? closeFrom * (1 - progressOut()) : progressIn();
+	}
+
+	/** Wie weit man sich schon vorgebeugt hat (0..1) – für die Hände und die schwebenden Leisten. */
+	public static float lean() {
+		return smooth(Mth.clamp((raw() - 0.45f) / 0.55f, 0, 1));
+	}
+
+	public static float blend() {
+		return raw();
+	}
+
+	private static float smooth(float t) {
 		return t * t * (3 - 2 * t);
 	}
 
 	private static float progressIn() {
-		return Mth.clamp((System.nanoTime() - startNanos) / (float) IN_NANOS, 0, 1);
+		return Mth.clamp((System.nanoTime() - startNanos) / (float) inNanos, 0, 1);
 	}
 
 	private static float progressOut() {
-		return Mth.clamp((System.nanoTime() - closeNanos) / (float) OUT_NANOS, 0, 1);
+		return Mth.clamp((System.nanoTime() - closeNanos) / (float) (inNanos * 0.8f), 0, 1);
 	}
+
+	private static long inNanos = 600_000_000L;
+	/** Wohin man tritt (Augenhöhe, vor der Jukebox) und wo der Kopf am Ende ist (vorgebeugt). */
+	private static Vec3 stepPos;
+	private static Vec3 leanPos;
+	private static Vec3 lookAt;
+	private static double walkDistance;
 
 	public static Vec3 cameraPos() {
-		return camPos;
+		return leanPos;
 	}
 
-	public static float cameraYaw() {
-		return camYaw;
+	/** Kamera für diesen Moment, ausgehend von der normalen Kamera (pos, yaw, pitch). Null = nichts ändern. */
+	public static float[] apply(Vec3 from, float yaw, float pitch, float[] outPos) {
+		float t = raw();
+		if (t <= 0 || leanPos == null) {
+			return null;
+		}
+		// 1) gehen: 0 .. 0.65
+		float walk = smooth(Mth.clamp(t / 0.65f, 0, 1));
+		Vec3 step = new Vec3(stepPos.x, from.y, stepPos.z);
+		Vec3 p = from.lerp(step, walk);
+		// Wippen wie beim Laufen (nur während des Gehens)
+		if (walk > 0 && walk < 1 && walkDistance > 0.3) {
+			double steps = Math.max(1, Math.round(walkDistance / 0.55));
+			p = p.add(0, -0.045 * Math.abs(Math.sin(walk * Math.PI * steps)), 0);
+		}
+		// 2) vorbeugen: 0.45 .. 1
+		float lean = lean();
+		p = p.lerp(leanPos, lean * lean);
+		p = new Vec3(p.x, Mth.lerp(lean, p.y, leanPos.y), p.z);
+		// Blickrichtung: beim Gehen zur Jukebox drehen, beim Vorbeugen nach unten
+		Vec3 d = lookAt.subtract(p);
+		double h = Math.sqrt(d.x * d.x + d.z * d.z);
+		float targetYaw = (float) (Math.toDegrees(Math.atan2(d.z, d.x)) - 90.0);
+		float targetPitch = (float) -Math.toDegrees(Math.atan2(d.y, h));
+		float turn = smooth(Mth.clamp(t / 0.5f, 0, 1));
+		float levelPitch = Mth.lerp(turn, pitch, Mth.clamp(targetPitch, -25, 25));
+		outPos[0] = (float) p.x;
+		outPos[1] = (float) p.y;
+		outPos[2] = (float) p.z;
+		return new float[]{yaw + Mth.wrapDegrees(targetYaw - yaw) * turn, Mth.lerp(lean, levelPitch, targetPitch)};
 	}
 
-	public static float cameraPitch() {
-		return camPitch;
-	}
-
-	/** Wohin die Kamera gleitet: schräg über (oder unter, bei Decken-Jukeboxen) die Jukebox, zur Jukebox hin schauend. */
+	/** Ziel ausrechnen: von der Seite, auf der man steht. */
 	private static void computeTarget(ClientLevel level, Vec3 eye, float playerYaw) {
 		Vec3 center = Vec3.atCenterOf(jukebox);
 		double dx = eye.x - center.x;
@@ -185,32 +215,36 @@ public final class LeanView {
 		double len = Math.sqrt(dx * dx + dz * dz);
 		if (len < 0.2) { // direkt drüber/drunter: von der Blickrichtung her
 			double rad = Math.toRadians(playerYaw);
-			dx = Math.sin(rad);
-			dz = -Math.cos(rad);
+			dx = -Math.sin(rad);
+			dz = Math.cos(rad);
 			len = 1;
 		}
 		dx /= len;
 		dz /= len;
 		boolean below = eye.y < center.y - 1.0; // Jukebox an der Decke
 		double up = below ? -1 : 1;
-		Vec3 look = center.add(0, up * 0.15, 0);
-		Vec3 best = null;
-		double[][] tries = {{1.35, 1.4}, {1.1, 1.25}, {0.85, 1.1}, {0.6, 1.0}, {0.3, 1.1}, {0.9, 0.7}};
+		// Stehen: knapp vor der Jukebox, aber nicht näher als man schon ist
+		double stand = Math.min(len, 1.3);
+		Vec3 step = center.add(dx * stand, 0, dz * stand);
+		if (!free(level, new Vec3(step.x, eye.y, step.z))) {
+			step = new Vec3(eye.x, eye.y, eye.z);
+		}
+		stepPos = step;
+		walkDistance = Math.sqrt((eye.x - step.x) * (eye.x - step.x) + (eye.z - step.z) * (eye.z - step.z));
+		// vorgebeugt: Kopf über der Vorderkante
+		Vec3 lean = null;
+		double[][] tries = {{1.12, 1.12}, {0.95, 1.05}, {0.8, 0.98}, {1.2, 0.85}};
 		for (double[] t : tries) {
 			Vec3 cand = center.add(dx * t[0], up * t[1], dz * t[0]);
 			if (free(level, cand)) {
-				best = cand;
+				lean = cand;
 				break;
 			}
 		}
-		if (best == null) { // eng: auf halbem Weg zwischen Kopf und Jukebox bleiben
-			best = eye.lerp(center, 0.4);
-		}
-		camPos = best;
-		Vec3 d = look.subtract(best);
-		double h = Math.sqrt(d.x * d.x + d.z * d.z);
-		camYaw = (float) (Math.toDegrees(Math.atan2(d.z, d.x)) - 90.0);
-		camPitch = (float) -Math.toDegrees(Math.atan2(d.y, h));
+		leanPos = lean != null ? lean : new Vec3(step.x, eye.y, step.z);
+		// etwas hinter die Mitte schauen, damit die Leisten an der Hinterkante gut zu sehen sind
+		lookAt = center.add(-dx * 0.3, up * 0.45, -dz * 0.3);
+		inNanos = (long) (Mth.clamp(0.35 + walkDistance * 0.3, 0.5, 1.2) * 1_000_000_000L);
 	}
 
 	private static boolean free(ClientLevel level, Vec3 p) {
