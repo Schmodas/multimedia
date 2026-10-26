@@ -37,7 +37,7 @@ public final class RadioManager {
 	private static final int GRACE_TICKS = 100;
 
 	/** Was eine Jukebox spielen soll: Link, Lautstärke (1.0 = 100 %) und Stereo-Kanal. */
-	record Wanted(Source source, float volume, int stereo) {
+	public record Wanted(Source source, float volume, int stereo) {
 		/** Über 100 % wird es nicht lauter, aber weiter hörbar (Reichweite in Vielfachen von 64 Blöcken). */
 		float range() {
 			return Math.max(1F, volume);
@@ -202,7 +202,8 @@ public final class RadioManager {
 	}
 
 	/** Was auf einem Schild steht: Link (Haupt-Jukebox) und/oder Kanal ("#haus"). */
-	public record SignInfo(Source source, String channel, float volume, int stereo, boolean screen, String tv) {
+	public record SignInfo(Source source, String channel, float volume, int stereo, boolean screen, String tv,
+			List<String> channels, boolean release) {
 	}
 
 	/** Schild-Info für einen Block: direkt ein Schild, oder eine Jukebox mit Schild daneben. */
@@ -290,9 +291,9 @@ public final class RadioManager {
 							// Live-Bildschirm: Ton über die Lautsprecher – außer beim Sender selbst (der hört seinen PC ja schon)
 							Source live = Source.live(info.tv());
 							masters.add(new Master(sp, info.channel(), new Wanted(live, info.volume(), 0),
-									info.tv().equalsIgnoreCase(myName) || Settings.tvSource(info.tv()) == null));
+									info.tv().equalsIgnoreCase(myName) || Settings.tvSource(info.tv()) == null, false));
 						} else if (info.source() != null && info.channel() != null) {
-							masters.add(new Master(sp, info.channel(), new Wanted(info.source(), info.volume(), 0), false));
+							masters.add(new Master(sp, info.channel(), new Wanted(info.source(), info.volume(), 0), false, info.release()));
 						}
 						continue;
 					}
@@ -305,7 +306,7 @@ public final class RadioManager {
 							Wanted w = new Wanted(info.source(), info.volume(), info.stereo());
 							found.putIfAbsent(jp.immutable(), w);
 							if (info.channel() != null) {
-								masters.add(new Master(jp.immutable(), info.channel(), w, false)); // Lautstärke des Haupt-Schilds gilt fürs ganze System
+								masters.add(new Master(jp.immutable(), info.channel(), w, false, info.release())); // Lautstärke des Haupt-Schilds gilt fürs ganze System
 							}
 						} else {
 							speakers.putIfAbsent(jp.immutable(), info);
@@ -315,10 +316,12 @@ public final class RadioManager {
 			}
 		}
 		lastMasters = masters;
-		// Lautsprecher: die nächste Haupt-Quelle mit ihrem Kanal (ohne Quelle in Reichweite: still)
+		// Lautsprecher: die nächste Haupt-Quelle ihres Kanals (ohne Quelle in Reichweite: still).
+		// Mehrere Kanäle ("#kino #1.2"): der Reihe nach – der erste, auf dem etwas läuft, gewinnt.
 		Map<BlockPos, String> noSender = new HashMap<>();
+		double now = level.getGameTime() / 20.0;
 		speakers.forEach((pos, info) -> {
-			Master main = nearestMaster(masters, info.channel(), pos);
+			Master main = choose(masters, info.channels(), pos, now);
 			if (main == null) {
 				noSender.put(pos, info.channel());
 			} else if (!main.silent()) {
@@ -331,8 +334,54 @@ public final class RadioManager {
 		return found;
 	}
 
-	/** Haupt-Quelle eines Kanals: Jukebox mit Link oder Leinwand; silent = ihr Ton kommt hier nicht aus den Lautsprechern. */
-	public record Master(BlockPos pos, String channel, Wanted wanted, boolean silent) {
+	/**
+	 * Haupt-Quelle eines Kanals: Jukebox mit Link oder Leinwand; silent = ihr Ton kommt hier nicht aus den Lautsprechern;
+	 * release = bei Pause den Kanal freigeben (Lautsprecher mit weiterem Kanal spielen dann diesen).
+	 */
+	public record Master(BlockPos pos, String channel, Wanted wanted, boolean silent, boolean release) {
+	}
+
+	/**
+	 * Welche Haupt-Quelle ein Lautsprecher mit diesen Kanälen spielt. Ein Kanal zählt als "frei", wenn es keine
+	 * Haupt-Quelle gibt, ihr Video zu Ende ist oder sie pausiert ist und ihren Kanal bei Pause freigibt.
+	 * Eine pausierte Quelle, die ihren Kanal hält, gewinnt (Lautsprecher bleiben still).
+	 * Ist kein Kanal belegt: der erste mit Haupt-Quelle (z. B. zu Ende), sonst null.
+	 */
+	public static Master choose(List<Master> masters, List<String> channels, BlockPos pos, double now) {
+		Master fallback = null;
+		for (String ch : channels) {
+			Master m = nearestMaster(masters, ch, pos);
+			if (m == null) {
+				continue;
+			}
+			if (fallback == null) {
+				fallback = m;
+			}
+			Source src = m.wanted().source();
+			if (m.silent() || (!isOver(src, now) && !(src.isPaused() && m.release()))) {
+				return m;
+			}
+		}
+		return fallback;
+	}
+
+	/** Ist das Video/die Playlist (ohne loop) schon zu Ende? Nur sicher, wenn die Längen bekannt sind. */
+	public static boolean isOver(Source src, double now) {
+		if (src == null || src.isLive() || src.loop() || src.isPaused() || src.start() < 0) {
+			return false;
+		}
+		List<Playback.Track> tracks = Tools.cachedTracks(src.url());
+		if (tracks == null || tracks.isEmpty()) {
+			return false;
+		}
+		double total = 0;
+		for (Playback.Track t : tracks) {
+			if (t.duration() <= 0) {
+				return false;
+			}
+			total += t.duration();
+		}
+		return src.positionAt(now) > total + 2;
 	}
 
 	private static volatile List<Master> lastMasters = List.of();
@@ -376,6 +425,16 @@ public final class RadioManager {
 		return lastScreens;
 	}
 
+	/** Was auf mehreren Kanälen (erster laufender gewinnt) an dieser Stelle läuft, oder null. */
+	public static Source channelSource(List<String> channels, BlockPos at) {
+		if (channels == null || channels.isEmpty()) {
+			return null;
+		}
+		ClientLevel level = Minecraft.getInstance().level;
+		Master m = choose(lastMasters, channels, at, level == null ? 0 : level.getGameTime() / 20.0);
+		return m == null ? null : m.wanted().source();
+	}
+
 	/** Was auf einem Kanal an dieser Stelle läuft (nächste Haupt-Quelle) oder null. */
 	public static Source channelSource(String channel, BlockPos at) {
 		if (channel == null) {
@@ -396,7 +455,8 @@ public final class RadioManager {
 	 */
 	static SignInfo parseSign(SignBlockEntity sign) {
 		SignParser.Info info = SignParser.parse(lines(sign, SignTextSlot.FRONT), lines(sign, SignTextSlot.BACK));
-		return info == null ? null : new SignInfo(info.source(), info.channel(), info.volume(), info.stereo(), info.screen(), info.tv());
+		return info == null ? null : new SignInfo(info.source(), info.channel(), info.volume(), info.stereo(), info.screen(), info.tv(),
+				info.channels(), info.release());
 	}
 
 	private static List<String> lines(SignBlockEntity sign, SignTextSlot slot) {

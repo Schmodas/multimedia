@@ -281,6 +281,21 @@ public abstract class SignEditScreenMixin extends Screen {
 			onDone();
 		}).bounds(this.width / 2 + 2, y, 98, 20).tooltip(Tooltip.create(Component.literal(
 				T.t("Startet für alle mit Mod von vorne.")))).build());
+		// Haupt-Schild mit Kanal: was Lautsprecher bei Pause machen (für alle gleich, steht als "⇆" auf dem Schild)
+		SignParser.Info info = currentInfo();
+		if (info != null && info.channel() != null) {
+			Button release = Button.builder(Component.literal(""), b -> {
+				boolean now = !currentReleases();
+				multimedia$replaceToken("\\s*" + SignParser.RELEASE, now ? SignParser.RELEASE : null);
+				multimedia$updateRelease(b);
+			}).bounds(this.width / 2 - 100, y + 48, 200, 20).build();
+			if (y + 48 + 20 > this.height) {
+				// kleines Fenster: unter "Fertig" ist kein Platz mehr -> oben rechts in die Ecke
+				release.setPosition(this.width - 204, 4);
+			}
+			multimedia$updateRelease(release);
+			this.addRenderableWidget(release);
+		}
 	}
 
 	// ------------------------------------------------------------------ Senden (Leinwand-Schilder)
@@ -378,6 +393,28 @@ public abstract class SignEditScreenMixin extends Screen {
 			}
 		}
 		this.line = keep;
+	}
+
+	/** Beschriftung des Pause-Knopfs für Lautsprecher (halten / freigeben). */
+	private void multimedia$updateRelease(Button b) {
+		boolean release = currentReleases();
+		b.setMessage(Component.literal(release ? T.t("Bei Pause: Kanal freigeben") : T.t("Bei Pause: Kanal halten")));
+		b.setTooltip(Tooltip.create(Component.literal(release
+				? T.t("Ist hier Pause, spielen Lautsprecher mit einem zweiten Kanal (z. B. \"#kino #1.2\") solange den anderen Kanal.")
+				: T.t("Ist hier Pause, bleiben die Lautsprecher dieses Kanals still – auch wenn sie noch einen zweiten Kanal haben."))));
+	}
+
+	private boolean currentReleases() {
+		SignParser.Info info = currentInfo();
+		return info != null && info.release();
+	}
+
+	/** Alles, was auf diesem Schild steht (beide Seiten, mit den aktuellen Eingaben), oder null. */
+	private SignParser.Info currentInfo() {
+		List<String> other = new ArrayList<>();
+		SignTextSlot otherSlot = this.slot == SignTextSlot.FRONT ? SignTextSlot.BACK : SignTextSlot.FRONT;
+		this.sign.getText(otherSlot).getMessages(false).forEach(c -> other.add(c.getString()));
+		return SignParser.parse(List.of(this.messages), other);
 	}
 
 	/** Link auf diesem Schild (beide Seiten) samt Start/Pause, oder null. */

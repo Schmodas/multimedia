@@ -79,7 +79,7 @@ public class LeanScreen extends Screen {
 			return T.t("⏸ Angehalten");
 		}
 		if (info != null && info.source() == null && info.channel() != null) {
-			return T.t("Lautsprecher für #") + info.channel();
+			return T.t("Lautsprecher für #") + String.join(" #", info.channels());
 		}
 		return "♪";
 	}

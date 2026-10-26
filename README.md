@@ -8,10 +8,11 @@ Download: [Modrinth](https://modrinth.com/mod/multimedia-cinema)
 
 - **Jukebox + disc + sign with a YouTube link** = music for everyone with the mod, at the same position in the song.
 - **Sound systems:** a main sign with link + channel (e.g. `#1.1`), speaker signs with just the channel.
+- **Several channels per speaker:** `#cinema #1.2` plays the cinema while a film runs, otherwise the house music. The main sign decides whether a pause holds or releases the channel.
 - **Screens:** a wall of one block type with a sign saying `screen` + link (or channel) below it shows the video.
 - **Playlists** with skip buttons, `mix` (shuffle), `loop`, volume (`80%`) and `left`/`right` stereo.
 - **Screen streaming:** stream a monitor and the sound of a chosen program to friends. Direct peer-to-peer connection (UDP hole punching), no server plugin and no port forwarding needed.
-- Walls and blocks dampen the sound; everything is adjustable in the settings (Mod Menu).
+- Realistic sound: behind walls mostly the bass gets through, far away it sounds softer, underwater it's muffled; rooms echo depending on their size and material. Everything is adjustable in the settings (Mod Menu).
 - English and German.
 
 Client-side only: the server doesn't need the mod, and players without it simply hear nothing.

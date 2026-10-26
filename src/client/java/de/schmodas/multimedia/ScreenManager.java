@@ -94,7 +94,7 @@ public final class ScreenManager {
 				}
 				continue;
 			}
-			Source source = sign.info().source() != null ? sign.info().source() : RadioManager.channelSource(sign.info().channel(), sign.pos());
+			Source source = sign.info().source() != null ? sign.info().source() : RadioManager.channelSource(sign.info().channels(), sign.pos());
 			if (source == null) {
 				continue;
 			}

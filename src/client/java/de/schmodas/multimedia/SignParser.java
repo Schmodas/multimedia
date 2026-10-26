@@ -10,12 +10,21 @@ import java.util.regex.Pattern;
  * - Link: darf über mehrere Zeilen gehen (Teile werden ohne Leerzeichen zusammengesetzt)
  * - Kanal "#1.1", Lautstärke "80%", Stereo "links"/"rechts", Optionen "mix"/"loop": in eigenen Zeilen oder zusammen
  *   in einer Zeile ("#1.1 80% mix"), auf der Vorder- oder Rückseite.
+ * - Lautsprecher mit mehreren Kanälen: "#kino #1.2" – der erste Kanal, auf dem etwas läuft, gewinnt.
  */
 public final class SignParser {
 	/** stereo: 0 = beide Kanäle gemischt, 1 = nur links, 2 = nur rechts. */
 	/** tv: Name des Spielers, der gerade auf diese Leinwand sendet ("tv:Schmodas"), sonst null. */
-	public record Info(Source source, String channel, float volume, int stereo, boolean screen, String tv) {
+	/**
+	 * channels: alle Kanäle in der Reihenfolge auf dem Schild ("#kino #1.2": erst #kino, sonst #1.2); channel = der erste.
+	 * release: Haupt-Schild gibt bei Pause seinen Kanal frei ("⇆"), Lautsprecher fallen dann auf ihren nächsten Kanal zurück.
+	 */
+	public record Info(Source source, String channel, float volume, int stereo, boolean screen, String tv,
+			List<String> channels, boolean release) {
 	}
+
+	/** Zeichen auf dem Haupt-Schild: bei Pause den Kanal freigeben (Knopf im Schild-Editor). */
+	public static final String RELEASE = "⇆";
 
 	private static final Pattern VOLUME = Pattern.compile("(\\d{1,3})%");
 	private static final Pattern CHANNEL = Pattern.compile("#([\\p{L}0-9_.,-]+)");
@@ -32,7 +41,8 @@ public final class SignParser {
 	private static final class Side {
 		final StringBuilder link = new StringBuilder();
 		final StringBuilder flags = new StringBuilder();
-		String channel;
+		final List<String> channels = new java.util.ArrayList<>();
+		boolean release;
 		Float volume;
 		Integer stereo;
 		boolean screen;
@@ -56,8 +66,13 @@ public final class SignParser {
 				Matcher ch = CHANNEL.matcher(token);
 				if (vol.matches()) {
 					side.volume = Math.min(200, Integer.parseInt(vol.group(1))) / 100F;
+				} else if (token.equals(RELEASE)) {
+					side.release = true;
 				} else if (ch.matches()) {
-					side.channel = ch.group(1).toLowerCase(Locale.ROOT);
+					String name = ch.group(1).toLowerCase(Locale.ROOT);
+					if (!side.channels.contains(name)) {
+						side.channels.add(name);
+					}
 				} else if (TV.matcher(token).matches()) {
 					Matcher tv = TV.matcher(token);
 					tv.matches();
@@ -89,7 +104,13 @@ public final class SignParser {
 		if (src == null) {
 			src = Source.parse(b.link + flags);
 		}
-		String channel = f.channel != null ? f.channel : b.channel;
+		List<String> channels = new java.util.ArrayList<>(f.channels);
+		for (String c : b.channels) {
+			if (!channels.contains(c)) {
+				channels.add(c);
+			}
+		}
+		String channel = channels.isEmpty() ? null : channels.get(0);
 		Float volume = f.volume != null ? f.volume : b.volume;
 		String tv = f.tv != null ? f.tv : b.tv;
 		boolean screen = f.screen || b.screen;
@@ -97,6 +118,7 @@ public final class SignParser {
 			return null;
 		}
 		Integer stereo = f.stereo != null ? f.stereo : b.stereo;
-		return new Info(src, channel, volume != null ? volume : 1F, stereo != null ? stereo : 0, screen, tv);
+		return new Info(src, channel, volume != null ? volume : 1F, stereo != null ? stereo : 0, screen, tv,
+				List.copyOf(channels), f.release || b.release);
 	}
 }

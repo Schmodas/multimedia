@@ -4,6 +4,7 @@ import de.schmodas.multimedia.LeanView;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import de.schmodas.multimedia.RadioManager;
 import net.minecraft.core.BlockPos;
 
 /**
@@ -55,7 +56,41 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			ctx.waitTicks(10);
 			shoot(ctx, server, "1.5 100 -0.6 0 -40", "7_decke", new BlockPos(1, 102, 1));
 			ctx.runOnClient(mc -> mc.options.fov().set(70));
+			channelLogic();
+			// Schild-Editor einer Haupt-Jukebox mit Kanal: Knopf "Bei Pause: Kanal halten/freigeben"
+			server.runCommand("fill -2 103 -2 2 103 2 minecraft:air");
+			server.runCommand("setblock 0 100 -1 minecraft:oak_wall_sign[facing=north]{front_text:{messages:[\"youtu.be/dQw4w9WgXcQ\",\"#kino\",\"\",\"\"]}}");
+			ctx.waitTicks(10);
+			shoot(ctx, server, "0.5 100 -2.2 0 35", "8_mit_schild");
+			ctx.runOnClient(mc -> LeanView.signAction(mc, null));
+			ctx.waitTicks(30);
+			ctx.takeScreenshot("9_schild_editor");
 		}
+	}
+
+	/** Prüft, welchen Kanal ein Lautsprecher "#kino #1.2" spielt. */
+	private static void channelLogic() {
+		BlockPos at = new BlockPos(0, 0, 0);
+		de.schmodas.multimedia.Source film = de.schmodas.multimedia.Source.parse("youtu.be/aaaaaaaaaaa");
+		de.schmodas.multimedia.Source filmPaused = de.schmodas.multimedia.Source.parse("youtu.be/aaaaaaaaaaa ⏸12.0");
+		de.schmodas.multimedia.Source house = de.schmodas.multimedia.Source.parse("youtu.be/bbbbbbbbbbb");
+		java.util.function.BiFunction<de.schmodas.multimedia.Source, Boolean, RadioManager.Master> kino = (src, rel) ->
+				new RadioManager.Master(new BlockPos(5, 0, 0), "kino", new RadioManager.Wanted(src, 1F, 0), false, rel);
+		RadioManager.Master haus = new RadioManager.Master(new BlockPos(9, 0, 0), "1.2", new RadioManager.Wanted(house, 1F, 0), false, false);
+		java.util.List<String> chans = java.util.List.of("kino", "1.2");
+		check("Kino läuft -> Kino", RadioManager.choose(java.util.List.of(kino.apply(film, false), haus), chans, at, 100), "kino");
+		check("kein Kino -> Haus", RadioManager.choose(java.util.List.of(haus), chans, at, 100), "1.2");
+		check("Kino Pause, halten -> Kino (still)", RadioManager.choose(java.util.List.of(kino.apply(filmPaused, false), haus), chans, at, 100), "kino");
+		check("Kino Pause, freigeben -> Haus", RadioManager.choose(java.util.List.of(kino.apply(filmPaused, true), haus), chans, at, 100), "1.2");
+		check("nichts -> null", RadioManager.choose(java.util.List.of(), chans, at, 100), null);
+		check("Parser", de.schmodas.multimedia.SignParser.parse(java.util.List.of("#kino #1.2 ⇆"), java.util.List.of()).channels().toString()
+				+ de.schmodas.multimedia.SignParser.parse(java.util.List.of("#kino #1.2 ⇆"), java.util.List.of()).release(), "[kino, 1.2]true");
+	}
+
+	private static void check(String what, Object got, String want) {
+		String g = got instanceof RadioManager.Master m ? m.channel() : got == null ? null : got.toString();
+		boolean ok = java.util.Objects.equals(g, want);
+		de.schmodas.multimedia.MultiMediaClient.LOGGER.info("KANAL-TEST {}: {} ({})", ok ? "OK" : "FEHLER", what, g);
 	}
 
 	private static void shoot(ClientGameTestContext ctx, net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext server,
