@@ -74,7 +74,8 @@ public final class Occlusion {
 				inst.occlusion = inst.targetReverb == null ? occ : inst.occlusion + (occ - inst.occlusion) * 0.5;
 				float o = (float) inst.occlusion;
 				// Stärke aus /disc wand: 0 = aus, 5 = Standard, 10 = sehr stark
-				double k = Settings.wallStrength() / 5.0;
+				// (5 = Standard; entspricht dem früheren 8 – Wände dämpfen jetzt etwas schneller)
+				double k = Settings.wallStrength() / 5.0 * 1.6;
 				Vec3 pos = new Vec3(inst.getX(), inst.getY(), inst.getZ());
 				double walls = o * k;
 				// klares Signal: hinter Wänden deutlich leiser und dumpfer ...
@@ -82,9 +83,16 @@ public final class Occlusion {
 				double hf = Math.max(0.03, 1.0 / (1.0 + walls * 4.0));
 				// ... der Bass kommt aber durch (wie bei einer Party nebenan): eigener Weg nur mit den Tiefen
 				double bass = walls <= 0.01 ? 0 : (1 - clear) * Math.pow(0.72, walls);
-				// Entfernung: Luft schluckt die Höhen, weit weg klingt es weicher
+				// Entfernung: Luft schluckt die Höhen; mit wachsender Entfernung wird die klare Musik
+				// zum dumpfen Wummern (gleicher Bass-Weg wie bei Wänden)
 				double dist = ear.distanceTo(pos);
+				double range = Math.max(16, inst.getVolume() * 16);
+				double far = Math.max(0, Math.min(1, (dist - 12) / (range * 0.6)));
 				hf *= Math.max(0.3, 1.0 - dist / 90.0);
+				if (eqAvailable) {
+					bass = Math.max(bass, clear * 0.7 * far);
+					clear *= 1 - 0.85 * far;
+				}
 				// unter Wasser: alles stark gedämpft, nur dumpfes Wummern
 				if (mc.player != null && mc.player.isEyeInFluid(net.minecraft.tags.FluidTags.WATER)) {
 					clear *= 0.3;
@@ -96,6 +104,11 @@ public final class Occlusion {
 					clear = Math.max(clear, Math.pow(0.6, walls));
 					bass = 0;
 				}
+				// sanft ausblenden: Minecraft wird nur gleichmäßig (linear) leiser und schneidet bei der Reichweite ab –
+				// zusätzlich so abfallen, dass es vor dem Rand schon fast still ist (kein abruptes Ende)
+				double fade = Math.pow(Math.max(0, 1 - dist / range), 1.3);
+				clear *= fade;
+				bass *= fade;
 				inst.targetGain = (float) clear;
 				inst.targetGainHf = (float) hf;
 				inst.targetBass = (float) bass;
@@ -204,6 +217,9 @@ public final class Occlusion {
 			EXTEfx.alFilteri(filter, EXTEfx.AL_FILTER_TYPE, EXTEfx.AL_FILTER_LOWPASS);
 			inst.alFilter = filter;
 		}
+		// Effekt-Wege (Hall, Bass) wie der direkte Ton mit der Entfernung leiser werden lassen –
+		// sonst bleiben sie in jeder Entfernung gleich laut (OpenAL-Standard: 0)
+		AL10.alSourcef(source, EXTEfx.AL_ROOM_ROLLOFF_FACTOR, 1.0F);
 		EXTEfx.alFilterf(inst.alFilter, EXTEfx.AL_LOWPASS_GAIN, gain);
 		EXTEfx.alFilterf(inst.alFilter, EXTEfx.AL_LOWPASS_GAINHF, gainHf);
 		AL10.alSourcei(source, EXTEfx.AL_DIRECT_FILTER, inst.alFilter);

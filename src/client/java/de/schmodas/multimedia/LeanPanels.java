@@ -129,13 +129,50 @@ public final class LeanPanels {
 		if (normals[best].dot(away) > 0.9) {
 			Strip discs = strip(camPos, camRight, c, faceY, normals[best], 0, h, below);
 			Strip buttons = strip(camPos, camRight, c, faceY, normals[best], CELL * 1.1 * height, h, below);
-			return new Strip[]{discs, buttons};
+			return reachable(camPos, new Strip[]{discs, buttons}, below);
 		}
 		Strip a = strip(camPos, camRight, c, faceY, normals[best], 0, h, below);
 		Strip b = strip(camPos, camRight, c, faceY, normals[second], 0, h, below);
 		double ma = a.topLeft.add(a.right.scale(0.5)).subtract(camPos).dot(camRight);
 		double mb = b.topLeft.add(b.right.scale(0.5)).subtract(camPos).dot(camRight);
-		return ma >= mb ? new Strip[]{a, b} : new Strip[]{b, a};
+		return reachable(camPos, ma >= mb ? new Strip[]{a, b} : new Strip[]{b, a}, below);
+	}
+
+	/** So weit weg dürfen die Hotbars höchstens sein (Blöcke), sonst kommen sie näher. */
+	private static final double MAX_REACH = 1.8;
+
+	/**
+	 * Hängt die Jukebox weit über einem (z. B. 5 Blöcke), wären die Hotbars winzig und kaum zu treffen:
+	 * dann schweben sie auf bequemer Entfernung zwischen Spieler und Jukebox (gleiche Lage, nur näher).
+	 */
+	private static Strip[] reachable(Vec3 cam, Strip[] strips, boolean below) {
+		if (!below) {
+			return strips;
+		}
+		Vec3 mid = strips[0].topLeft.add(strips[0].right.scale(0.5)).add(strips[0].down.scale(0.5));
+		double d = mid.distanceTo(cam);
+		if (d <= MAX_REACH) {
+			return strips;
+		}
+		Vec3 toCam = cam.subtract(mid).normalize();
+		Vec3 newMid = mid.add(toCam.scale(d - MAX_REACH));
+		// zur Kamera drehen (sonst sieht man sie von unten nur als Strich): links/rechts bleibt waagerecht
+		Vec3 rightU = strips[0].right.normalize();
+		Vec3 oldDownU = strips[0].down.normalize();
+		Vec3 newDownU = rightU.cross(toCam).normalize();
+		if (newDownU.y > 0) {
+			newDownU = newDownU.scale(-1);
+		}
+		Strip[] out = new Strip[strips.length];
+		for (int i = 0; i < strips.length; i++) {
+			Strip s = strips[i];
+			Vec3 c = s.topLeft.add(s.right.scale(0.5)).add(s.down.scale(0.5));
+			Vec3 rel = c.subtract(mid);
+			Vec3 nc = newMid.add(rightU.scale(rel.dot(rightU))).add(newDownU.scale(rel.dot(oldDownU)));
+			Vec3 down = newDownU.scale(s.down.length());
+			out[i] = new Strip(nc.subtract(s.right.scale(0.5)).subtract(down.scale(0.5)), s.right, down, toCam);
+		}
+		return out;
 	}
 
 	/** Hotbar, die auf einer Kante steht (bzw. bei Decken-Jukeboxen darunter hängt), links/rechts wie man es sieht. */

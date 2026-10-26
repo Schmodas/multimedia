@@ -56,6 +56,10 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			ctx.waitTicks(10);
 			shoot(ctx, server, "1.5 100 -0.6 0 -40", "7_decke", new BlockPos(1, 102, 1));
 			ctx.runOnClient(mc -> mc.options.fov().set(70));
+			// Jukebox 5 Blöcke über dem Kopf: Hotbars sollen in Reichweite schweben
+			server.runCommand("setblock 4 106 0 minecraft:jukebox");
+			ctx.waitTicks(10);
+			shoot(ctx, server, "4.5 100 -1.5 0 -60", "7b_hoch", new BlockPos(4, 106, 0));
 			channelLogic();
 			// Schild-Editor einer Haupt-Jukebox mit Kanal: Knopf "Bei Pause: Kanal halten/freigeben"
 			server.runCommand("fill -2 103 -2 2 103 2 minecraft:air");
