@@ -19,6 +19,8 @@ public final class LeanPanels {
 	public static final int VISIBLE = 6;
 	/** Eine Hotbar ist genau eine Blockkante lang, die Felder sind quadratisch. */
 	public static final double CELL = 1.0 / VISIBLE;
+	/** Abstand zwischen Jukebox und Hotbar, in Blöcken. */
+	static final double FLOAT = 0.15;
 
 	public record Control(String icon, String label, boolean active, Runnable run) {
 	}
@@ -138,7 +140,9 @@ public final class LeanPanels {
 		if (along.dot(camRight) < 0) {
 			along = along.scale(-1);
 		}
-		Vec3 mid = new Vec3(c.x + normal.x * 0.5, faceY + (below ? -lift : lift), c.z + normal.z * 0.5);
+		// schwebt etwas über der Kante statt direkt draufzustehen
+		double floatUp = FLOAT * Math.min(1, h / (CELL * 0.5));
+		Vec3 mid = new Vec3(c.x + normal.x * 0.5, faceY + (below ? -(lift + floatUp) : lift + floatUp), c.z + normal.z * 0.5);
 		Vec3 left = mid.subtract(along.scale(0.5));
 		// leicht nach hinten geneigt, damit man gut draufschaut
 		Vec3 up = new Vec3(normal.x * 0.12, 1, normal.z * 0.12).normalize().scale(h);
