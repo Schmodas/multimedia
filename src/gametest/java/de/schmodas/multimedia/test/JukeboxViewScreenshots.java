@@ -26,6 +26,13 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			server.runCommand("gamemode creative @a");
 			ctx.waitTicks(40);
 
+			// das Jukebox-Modell ohne Ansicht, schräg von oben und nah von der Seite
+			server.runCommand("tp @a -1.3 100 -1.3 -45 38");
+			ctx.waitTicks(40);
+			ctx.takeScreenshot("0_modell_schraeg");
+			server.runCommand("tp @a 1.9 99.6 -0.4 70 12");
+			ctx.waitTicks(30);
+			ctx.takeScreenshot("0_modell_seite");
 			// ohne Platten
 			shoot(ctx, server, "0.5 100 -1.6 0 35", "1_vorne_leer");
 			// mit Platten
