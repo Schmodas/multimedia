@@ -95,6 +95,11 @@ public class StreamSoundInstance extends AbstractSoundInstance {
 	/** Hall, der gerade im Effekt-Slot geladen ist (nur Sound-Thread). */
 	RoomAcoustics.Reverb loadedReverb;
 	int appliedSettings = -1;
+	/** Bass, der durch Wände dringt (Equalizer-Weg, nur Tiefen), 0..1. */
+	float targetBass;
+	float appliedBass;
+	volatile int alEqEffect;
+	volatile int alEqSlot;
 	/** Lautstärke vom Schild (0..1), wird über den Filter angewendet. */
 	volatile float userVolume = 1F;
 

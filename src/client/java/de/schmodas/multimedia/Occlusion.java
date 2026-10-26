@@ -75,8 +75,30 @@ public final class Occlusion {
 				float o = (float) inst.occlusion;
 				// Stärke aus /disc wand: 0 = aus, 5 = Standard, 10 = sehr stark
 				double k = Settings.wallStrength() / 5.0;
-				inst.targetGain = (float) Math.max(0.12 / Math.max(1, k * k), Math.pow(0.6, o * k)); // leiser pro Wand
-				inst.targetGainHf = (float) Math.max(0.03 / Math.max(1, k), 1.0 / (1.0 + o * 4.0 * k)); // dumpfer pro Wand
+				Vec3 pos = new Vec3(inst.getX(), inst.getY(), inst.getZ());
+				double walls = o * k;
+				// klares Signal: hinter Wänden deutlich leiser und dumpfer ...
+				double clear = Math.max(0.04, Math.pow(0.5, walls));
+				double hf = Math.max(0.03, 1.0 / (1.0 + walls * 4.0));
+				// ... der Bass kommt aber durch (wie bei einer Party nebenan): eigener Weg nur mit den Tiefen
+				double bass = walls <= 0.01 ? 0 : (1 - clear) * Math.pow(0.72, walls);
+				// Entfernung: Luft schluckt die Höhen, weit weg klingt es weicher
+				double dist = ear.distanceTo(pos);
+				hf *= Math.max(0.3, 1.0 - dist / 90.0);
+				// unter Wasser: alles stark gedämpft, nur dumpfes Wummern
+				if (mc.player != null && mc.player.isEyeInFluid(net.minecraft.tags.FluidTags.WATER)) {
+					clear *= 0.3;
+					hf = Math.min(hf, 0.06);
+					bass = Math.max(bass, 0.7);
+				}
+				if (!eqAvailable) {
+					// ohne zweiten Effekt-Weg: wie bisher, nur leiser statt Bass
+					clear = Math.max(clear, Math.pow(0.6, walls));
+					bass = 0;
+				}
+				inst.targetGain = (float) clear;
+				inst.targetGainHf = (float) hf;
+				inst.targetBass = (float) bass;
 				inst.targetReverb = Settings.reverb()
 						? RoomAcoustics.at(level, BlockPos.containing(inst.getX(), inst.getY(), inst.getZ()), tick)
 						: RoomAcoustics.Reverb.NONE;
@@ -84,19 +106,26 @@ public final class Occlusion {
 			// ... aber jeden Tick ein kleines Stück dorthin gleiten: Sprünge in der Lautstärke knacken hörbar.
 			float wantGain = Math.max(0.001F, inst.targetGain * inst.userVolume); // inkl. Schild-Lautstärke
 			float wantHf = Math.max(0.001F, inst.targetGainHf);
+			float wantBass = Math.max(0.001F, inst.targetBass * inst.userVolume);
 			boolean first = inst.appliedSettings == -1;
 			float gain = first ? wantGain : glide(inst.appliedGain, wantGain, MAX_GAIN_STEP);
 			float gainHf = first ? wantHf : glide(inst.appliedGainHf, wantHf, MAX_HF_STEP);
+			float bass = first ? wantBass : glide(inst.appliedBass, wantBass, MAX_GAIN_STEP);
 			RoomAcoustics.Reverb reverb = inst.targetReverb;
-			if (!first && gain == inst.appliedGain && gainHf == inst.appliedGainHf
+			if (!first && gain == inst.appliedGain && gainHf == inst.appliedGainHf && bass == inst.appliedBass
 					&& reverb.equals(inst.appliedReverb) && inst.appliedSettings == Settings.version) {
 				continue;
 			}
 			inst.appliedGain = gain;
 			inst.appliedGainHf = gainHf;
+			inst.appliedBass = bass;
 			inst.appliedReverb = reverb;
 			inst.appliedSettings = Settings.version;
-			handle.execute(channel -> apply(inst, ((ChannelAccessor) channel).multimedia$getSource(), gain, gainHf, reverb));
+			handle.execute(channel -> {
+				int source = ((ChannelAccessor) channel).multimedia$getSource();
+				apply(inst, source, gain, gainHf, reverb);
+				applyBass(inst, source, bass);
+			});
 		}
 	}
 
@@ -106,11 +135,20 @@ public final class Occlusion {
 	 * ohne Aufräumen sammeln sie sich an, bis der ganze Spiel-Sound knackt.
 	 */
 	private static void release(SoundEngineAccessor engine, StreamSoundInstance inst) {
-		if (inst.alFilter == 0 && inst.alSlot == 0 && inst.alEffect == 0) {
+		if (inst.alFilter == 0 && inst.alSlot == 0 && inst.alEffect == 0 && inst.alEqSlot == 0 && inst.alEqEffect == 0) {
 			return;
 		}
 		engine.multimedia$getExecutor().execute(() -> {
 			AL10.alGetError();
+			if (inst.alEqSlot != 0) {
+				EXTEfx.alAuxiliaryEffectSloti(inst.alEqSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, EXTEfx.AL_EFFECT_NULL);
+				EXTEfx.alDeleteAuxiliaryEffectSlots(inst.alEqSlot);
+				inst.alEqSlot = 0;
+			}
+			if (inst.alEqEffect != 0) {
+				EXTEfx.alDeleteEffects(inst.alEqEffect);
+				inst.alEqEffect = 0;
+			}
 			if (inst.alSlot != 0) {
 				EXTEfx.alAuxiliaryEffectSloti(inst.alSlot, EXTEfx.AL_EFFECTSLOT_EFFECT, EXTEfx.AL_EFFECT_NULL);
 				EXTEfx.alDeleteAuxiliaryEffectSlots(inst.alSlot);
@@ -175,6 +213,62 @@ public final class Occlusion {
 			return;
 		}
 		applyReverb(inst, source, reverb);
+	}
+
+	/** Ob OpenAL einen zweiten Effekt-Weg pro Quelle hat (für den Bass durch Wände). Wird im Sound-Thread geprüft. */
+	private static volatile boolean eqAvailable = true;
+	private static volatile boolean eqChecked;
+
+	/**
+	 * Bass durch Wände: zweiter Effekt-Weg (Send 1) mit einem Equalizer, der nur die Tiefen durchlässt.
+	 * Der normale Tiefpass-Filter von OpenAL dämpft nur ab ca. 5000 Hz (Stimmen blieben klar), der Equalizer
+	 * nimmt Mitten und Höhen fast ganz weg – so klingt es hinter Wänden nach dumpfem Wummern.
+	 */
+	private static void applyBass(StreamSoundInstance inst, int source, float bass) {
+		if (efxBroken || !eqAvailable) {
+			return;
+		}
+		if (!eqChecked) {
+			eqChecked = true;
+			long device = org.lwjgl.openal.ALC10.alcGetContextsDevice(org.lwjgl.openal.ALC10.alcGetCurrentContext());
+			int sends = org.lwjgl.openal.ALC10.alcGetInteger(device, EXTEfx.ALC_MAX_AUXILIARY_SENDS);
+			if (sends < 2) {
+				eqAvailable = false;
+				MultiMediaClient.LOGGER.info("OpenAL hat nur {} Effekt-Weg(e) – Bass durch Wände aus", sends);
+				return;
+			}
+		}
+		AL10.alGetError();
+		if (inst.alEqSlot == 0) {
+			int effect = EXTEfx.alGenEffects();
+			int slot = EXTEfx.alGenAuxiliaryEffectSlots();
+			if (AL10.alGetError() != AL10.AL_NO_ERROR || effect == 0 || slot == 0) {
+				eqAvailable = false;
+				MultiMediaClient.LOGGER.warn("OpenAL-Equalizer nicht verfügbar – Bass durch Wände aus");
+				return;
+			}
+			EXTEfx.alEffecti(effect, EXTEfx.AL_EFFECT_TYPE, EXTEfx.AL_EFFECT_EQUALIZER);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_LOW_CUTOFF, 300F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_LOW_GAIN, 1.8F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID1_CENTER, 600F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID1_WIDTH, 1.0F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID1_GAIN, 0.126F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID2_CENTER, 2500F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID2_WIDTH, 1.0F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_MID2_GAIN, 0.126F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_HIGH_CUTOFF, 4000F);
+			EXTEfx.alEffectf(effect, EXTEfx.AL_EQUALIZER_HIGH_GAIN, 0.126F);
+			EXTEfx.alAuxiliaryEffectSloti(slot, EXTEfx.AL_EFFECTSLOT_EFFECT, effect);
+			EXTEfx.alAuxiliaryEffectSloti(slot, EXTEfx.AL_EFFECTSLOT_AUXILIARY_SEND_AUTO, AL10.AL_FALSE);
+			inst.alEqEffect = effect;
+			inst.alEqSlot = slot;
+		}
+		EXTEfx.alAuxiliaryEffectSlotf(inst.alEqSlot, EXTEfx.AL_EFFECTSLOT_GAIN, Math.min(1F, bass));
+		AL11.alSource3i(source, EXTEfx.AL_AUXILIARY_SEND_FILTER, inst.alEqSlot, 1, EXTEfx.AL_FILTER_NULL);
+		if (AL10.alGetError() != AL10.AL_NO_ERROR) {
+			eqAvailable = false;
+			MultiMediaClient.LOGGER.warn("OpenAL-Equalizer ließ sich nicht setzen – Bass durch Wände aus");
+		}
 	}
 
 	/** Hall über einen "Effekt-Slot" von OpenAL; der Hall-Anteil geht durch denselben Wand-Filter. */
