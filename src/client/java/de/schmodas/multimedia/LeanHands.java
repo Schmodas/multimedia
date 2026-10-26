@@ -3,10 +3,13 @@ package de.schmodas.multimedia;
 import com.mojang.blaze3d.vertex.PoseStack;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
 import net.minecraft.client.Minecraft;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.model.geom.builders.CubeDeformation;
+import net.minecraft.client.model.geom.builders.LayerDefinition;
 import net.minecraft.client.model.player.PlayerModel;
 import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.client.renderer.entity.player.AvatarRenderer;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
 import net.minecraft.client.renderer.texture.OverlayTexture;
@@ -30,6 +33,13 @@ public final class LeanHands {
 	/** Der Arm ist 4 Pixel dick: seine Mitte liegt 2 Pixel über der Fläche. */
 	private static final double REST = 0.85 * 2 / 16.0 + 0.004;
 
+	private static final Supplier<ModelPart> WIDE = Suppliers.memoize(() -> bake(false));
+	private static final Supplier<ModelPart> SLIM = Suppliers.memoize(() -> bake(true));
+
+	private static ModelPart bake(boolean slim) {
+		return LayerDefinition.create(PlayerModel.createMesh(CubeDeformation.NONE, slim), 64, 64).bakeRoot();
+	}
+
 	private LeanHands() {
 	}
 
@@ -45,9 +55,6 @@ public final class LeanHands {
 		Vec3 center = Vec3.atCenterOf(jb);
 		if (eye.y < center.y) {
 			return; // Jukebox an der Decke: da stützt man sich nicht ab
-		}
-		if (!(mc.getEntityRenderDispatcher().getRenderer(player) instanceof AvatarRenderer<?> renderer)) {
-			return;
 		}
 		// Richtungen fest an der Jukebox (aus der Kopfposition beim Vorbeugen, ändert sich nicht beim Umschauen):
 		// n zeigt von der Jukebox zum Spieler, a nach rechts
@@ -69,15 +76,19 @@ public final class LeanHands {
 		// links: Hand stützt sich an der vorderen linken Ecke ab
 		Vec3 handL = onTop(jb, topCenter.add(n.scale(0.3)).add(a.scale(-0.33))).add(slide);
 
-		PlayerModel model = renderer.getModel();
 		PlayerSkin skin = player.getSkin();
 		boolean slim = skin.model() == PlayerModelType.SLIM;
+		// eigener, normaler Arm statt dem des Spielermodells: Ressourcenpakete wie Fresh Animations (über
+		// Entity Model Features) ersetzen das Spielermodell, dann stimmen Maße und Drehpunkte nicht mehr
+		ModelPart root = slim ? SLIM.get() : WIDE.get();
 		RenderType type = RenderTypes.entityTranslucent(skin.body().texturePath());
 		int light = LightCoordsUtil.getLightCoords(mc.level, jb.above());
 		Vec3 cam = ctx.gameRenderer().mainCamera().position();
 
-		ModelPart right = prepare(model.rightArm, model.rightSleeve, player.isModelPartShown(PlayerModelPart.RIGHT_SLEEVE));
-		ModelPart left = prepare(model.leftArm, model.leftSleeve, player.isModelPartShown(PlayerModelPart.LEFT_SLEEVE));
+		ModelPart rightArm = root.getChild("right_arm");
+		ModelPart leftArm = root.getChild("left_arm");
+		ModelPart right = prepare(rightArm, rightArm.getChild("right_sleeve"), player.isModelPartShown(PlayerModelPart.RIGHT_SLEEVE));
+		ModelPart left = prepare(leftArm, leftArm.getChild("left_sleeve"), player.isModelPartShown(PlayerModelPart.LEFT_SLEEVE));
 		segment(ctx, cam, right, true, slim, shoulderR, handR, type, light);
 		segment(ctx, cam, left, false, slim, shoulderL, handL, type, light);
 	}
