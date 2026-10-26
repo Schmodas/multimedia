@@ -41,6 +41,16 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			server.runCommand("give @a minecraft:music_disc_13");
 			shoot(ctx, server, "0.5 100 -1.6 0 35", "2_vorne_platten");
 			shoot(ctx, server, "-0.9 100 -0.9 -45 35", "3_schraeg_platten");
+			// weites Sichtfeld wie bei vielen Spielern
+			ctx.runOnClient(mc -> mc.options.fov().set(110));
+			shoot(ctx, server, "-0.9 100 -0.9 -45 35", "4_fov110_schraeg");
+			shoot(ctx, server, "0.5 100 -1.6 0 35", "5_fov110_vorne");
+			// enger Raum: Decke 3 Blöcke hoch, Wände knapp
+			server.runCommand("fill -2 103 -2 2 103 2 minecraft:stone");
+			server.runCommand("fill -2 100 -2 2 102 -2 minecraft:stone_bricks");
+			server.runCommand("fill -2 100 -2 -2 102 2 minecraft:stone_bricks");
+			shoot(ctx, server, "-0.9 100 -0.9 -45 35", "6_raum_schraeg");
+			ctx.runOnClient(mc -> mc.options.fov().set(70));
 		}
 	}
 
