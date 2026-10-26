@@ -58,8 +58,8 @@ public final class JukeboxVisuals {
 		Set<BlockPos> seen = new HashSet<>();
 		Vec3 me = mc.player.position();
 		for (RadioManager.Playing p : RadioManager.playing(mc)) {
-			if (!p.audible()) {
-				continue;
+			if (!p.audible() || covered(level, p.pos())) {
+				continue; // Block direkt obendrauf (z. B. Decke): kein Titel, keine Noten – sonst scheinen sie durch
 			}
 			seen.add(p.pos());
 			double top = topOf(level, p.pos());
@@ -74,13 +74,13 @@ public final class JukeboxVisuals {
 		if (!Settings.hideTitles()) {
 			double max = Settings.titleDistance();
 			RadioManager.failed().forEach((pos, error) -> {
-				if (!seen.contains(pos) && Vec3.atCenterOf(pos).distanceToSqr(me) < max * max) {
+				if (!seen.contains(pos) && !covered(level, pos) && Vec3.atCenterOf(pos).distanceToSqr(me) < max * max) {
 					seen.add(pos);
 					updateLabel(level, pos, "§c⚠ " + shorten(error), topOf(level, pos));
 				}
 			});
 			RadioManager.speakersWithoutSender().forEach((pos, channel) -> {
-				if (!seen.contains(pos) && level.getBlockState(pos).is(net.minecraft.world.level.block.Blocks.JUKEBOX)
+				if (!seen.contains(pos) && !covered(level, pos) && level.getBlockState(pos).is(net.minecraft.world.level.block.Blocks.JUKEBOX)
 						&& Vec3.atCenterOf(pos).distanceToSqr(me) < max * max) {
 					seen.add(pos);
 					updateLabel(level, pos, "§7#" + channel + T.t(": kein Sender"), topOf(level, pos));
@@ -103,6 +103,13 @@ public final class JukeboxVisuals {
 			LABELS.values().forEach(l -> remove(mc.level, l));
 		}
 		LABELS.clear();
+	}
+
+	/** Steht direkt auf der Jukebox ein fester Block (Decke, Stein, Holz …)? Schilder, Fackeln, Blumen zählen nicht. */
+	private static boolean covered(ClientLevel level, BlockPos pos) {
+		BlockPos above = pos.above();
+		BlockState state = level.getBlockState(above);
+		return !state.isAir() && (state.isSolidRender() || !state.getCollisionShape(level, above).isEmpty());
 	}
 
 	/** Höhe über der Jukebox, ab der frei ist (Schild oder anderer Block obendrauf wird übersprungen). */
