@@ -147,6 +147,42 @@ public final class VideoPlayer implements ScreenSource {
 		return hasFrame;
 	}
 
+	/** Zwischen zwei Titeln (nächster wird geladen): "lädt …" statt eingefrorenem letzten Bild. */
+	private volatile boolean betweenTracks;
+
+	@Override
+	public String status() {
+		return !hasFrame && betweenTracks ? T.t("lädt …") : null;
+	}
+
+	/** Wofür schon vorgeladen wurde (Durchlauf/Titel), damit es nur einmal passiert. */
+	private String prefetchedFor;
+
+	/** Nächsten Titel schon im Hintergrund auflösen (yt-dlp braucht dafür manchmal 20 s und mehr). */
+	private void prefetchNext(Tools.Paths paths, Playback pb, Playback.Position pos) {
+		String key = pos.pass() + "/" + pos.index();
+		if (key.equals(prefetchedFor) || tracks == null || tracks.isEmpty()) {
+			return;
+		}
+		prefetchedFor = key;
+		List<Playback.Track> order = pb.order(pos.pass());
+		Playback.Track next = pos.index() + 1 < order.size() ? order.get(pos.index() + 1)
+				: (source.loop() || pb.isRadio()) ? pb.order(pos.pass() + 1).get(0) : null;
+		if (next == null || PIPE_ONLY.contains(next.url())) {
+			return;
+		}
+		String url = next.url();
+		Thread pre = new Thread(() -> {
+			try {
+				directUrl(paths, url);
+				MultiMediaClient.LOGGER.info("Video: nächster Titel vorgeladen");
+			} catch (Exception ignored) {
+			}
+		}, "MultiMedia-VideoPrefetch");
+		pre.setDaemon(true);
+		pre.start();
+	}
+
 	public Identifier textureId() {
 		return textureId;
 	}
@@ -205,6 +241,9 @@ public final class VideoPlayer implements ScreenSource {
 					pos = new Playback.Position(seqPass, seqIndex, Math.max(0, now - seqStart));
 				}
 				Playback.Track track = pb.order(pos.pass()).get(pos.index());
+				if (!src.isPaused()) {
+					prefetchNext(paths, pb, pos);
+				}
 				double trackStart = now - pos.offset();         // Uhrzeit, zu der dieser Titel begonnen hat
 				if (src.isPaused()) {
 					// Pause: Bild steht. Nur wenn noch keins da ist (Leinwand neu), das Standbild an der Stelle holen.
@@ -224,6 +263,11 @@ public final class VideoPlayer implements ScreenSource {
 				}
 				lastEnded = false;
 				int frames = playTrack(paths, track, trackStart, offset, gen, false);
+				if (lastEnded && frames > 0 && !closed && gen == generation) {
+					// Titel zu Ende: bis das erste Bild des nächsten da ist, "lädt …" zeigen
+					betweenTracks = true;
+					hasFrame = false;
+				}
 				if (lastEnded && frames > 0) {
 					endedGen = gen;
 					endedPass = pos.pass();
@@ -375,6 +419,7 @@ public final class VideoPlayer implements ScreenSource {
 				}
 				shownClock = frameClock;
 				hasFrame = true;
+				betweenTracks = false;
 			}
 		} finally {
 			ff.destroy();

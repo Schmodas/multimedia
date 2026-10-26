@@ -159,6 +159,12 @@ public final class YtAudioStream implements AudioStream {
 				long before = bytesProduced;
 				for (int i = index; i < order.size() && !closed; i++) {
 					Playback.Track t = order.get(i);
+					// nächsten Titel schon auflösen, während dieser läuft (sonst Pause zwischen den Titeln)
+					Playback.Track next = i + 1 < order.size() ? order.get(i + 1)
+							: loop ? playback.order(pass + 1).get(0) : null;
+					if (next != null) {
+						prefetch(paths, next.url());
+					}
 					put(new TrackStart(pass, i, t.title()));
 					playOne(paths, t.url(), offset);
 					offset = 0;
@@ -191,6 +197,20 @@ public final class YtAudioStream implements AudioStream {
 	 */
 	private void playOne(Tools.Paths paths, String url, double offset) throws IOException, InterruptedException {
 		requireSafe(url);
+		Tools.Direct ready = prefetched(url);
+		if (ready != null) {
+			// schon vorgeladen: direkt abspielen, ohne erneut auf yt-dlp zu warten
+			long before = bytesProduced;
+			try {
+				playDirect(paths, ready, offset);
+			} catch (IOException e) {
+				MultiMediaClient.LOGGER.warn("Vorgeladene Adresse ging nicht: {}", e.getMessage());
+			}
+			if (bytesProduced > before || closed) {
+				return;
+			}
+			PREFETCHED.remove(url);
+		}
 		if (offset >= DIRECT_SEEK_FROM) {
 			long before = bytesProduced;
 			try {
@@ -238,6 +258,10 @@ public final class YtAudioStream implements AudioStream {
 		if (direct == null) {
 			throw new IOException(T.t("keine direkte Adresse"));
 		}
+		playDirect(paths, direct, offset);
+	}
+
+	private void playDirect(Tools.Paths paths, Tools.Direct direct, double offset) throws IOException, InterruptedException {
 		List<String> cmd = new ArrayList<>(List.of(paths.ffmpeg(), "-hide_banner", "-loglevel", "error"));
 		cmd.addAll(direct.inputArgs()); // Kopfzeilen, die YouTube erwartet
 		cmd.addAll(List.of("-ss", String.format(java.util.Locale.ROOT, "%.2f", offset), "-i", direct.url(),
@@ -266,6 +290,42 @@ public final class YtAudioStream implements AudioStream {
 			ffmpeg.destroy();
 			processes.remove(ffmpeg);
 		}
+	}
+
+	// ---------------------------------------------------------------- Vorladen
+
+	/** Vorgeladene direkte Audio-Adressen (YouTube-Adressen gelten einige Stunden; wir nehmen sie höchstens 1 h). */
+	private record Prefetch(long createdNanos, CompletableFuture<Tools.Direct> direct) {
+	}
+
+	private static final java.util.Map<String, Prefetch> PREFETCHED = new java.util.concurrent.ConcurrentHashMap<>();
+	private static final long PREFETCH_MAX_AGE = 3_600_000_000_000L;
+
+	private void prefetch(Tools.Paths paths, String url) {
+		if (!Source.isSafe(url)) {
+			return;
+		}
+		Prefetch old = PREFETCHED.get(url);
+		if (old != null && System.nanoTime() - old.createdNanos() < PREFETCH_MAX_AGE) {
+			return;
+		}
+		CompletableFuture<Tools.Direct> f = CompletableFuture.supplyAsync(() -> {
+			try {
+				return Tools.resolveDirect(paths, url, "bestaudio/best", msg -> { });
+			} catch (Exception e) {
+				return null;
+			}
+		});
+		PREFETCHED.put(url, new Prefetch(System.nanoTime(), f));
+	}
+
+	/** Vorgeladene Adresse, wenn sie schon fertig ist (sonst null: dann normal laden statt zu warten). */
+	private static Tools.Direct prefetched(String url) {
+		Prefetch p = PREFETCHED.get(url);
+		if (p == null || System.nanoTime() - p.createdNanos() > PREFETCH_MAX_AGE || !p.direct().isDone()) {
+			return null;
+		}
+		return p.direct().getNow(null);
 	}
 
 	/** Nur echte YouTube-Adressen an yt-dlp geben (siehe Source). */
