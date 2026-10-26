@@ -104,10 +104,14 @@ public final class LeanPanels {
 		Vector3f r = new Vector3f(1, 0, 0).rotate(cam.rotation());
 		Vec3 camRight = new Vec3(r.x, r.y, r.z);
 		Vec3 c = Vec3.atCenterOf(jukebox);
-		boolean below = camPos.y < c.y - 0.5;
+		boolean below = camPos.y < c.y; // Kamera unter der Mitte: Hotbars hängen an der Unterkante
 		double faceY = below ? jukebox.getY() - 0.002 : jukebox.getY() + 1.002;
 		Vec3 away = new Vec3(c.x - camPos.x, 0, c.z - camPos.z);
 		away = away.lengthSqr() < 1e-4 ? new Vec3(0, 0, 1) : away.normalize();
+		if (below) {
+			// Decken-Jukebox: an die vordere Unterkante (zwischen Spieler und Jukebox), dort sind sie groß und lesbar
+			away = away.scale(-1);
+		}
 		Vec3[] normals = {new Vec3(0, 0, -1), new Vec3(0, 0, 1), new Vec3(-1, 0, 0), new Vec3(1, 0, 0)};
 		int best = 0;
 		for (int i = 1; i < 4; i++) {

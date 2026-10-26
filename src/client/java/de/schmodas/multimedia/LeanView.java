@@ -221,7 +221,8 @@ public final class LeanView {
 		}
 		dx /= len;
 		dz /= len;
-		boolean below = eye.y < center.y - 1.0; // Jukebox an der Decke
+		// Jukebox über Augenhöhe (z. B. an der Decke): nicht hochklettern, sondern stehen bleiben und hochschauen
+		boolean below = eye.y < center.y;
 		double up = below ? -1 : 1;
 		// Stehen: knapp vor der Jukebox, aber nicht näher als man schon ist
 		double stand = Math.min(len, 1.3);
@@ -231,14 +232,27 @@ public final class LeanView {
 		}
 		stepPos = step;
 		walkDistance = Math.sqrt((eye.x - step.x) * (eye.x - step.x) + (eye.z - step.z) * (eye.z - step.z));
-		// vorgebeugt: Kopf über der Vorderkante
 		Vec3 lean = null;
-		double[][] tries = {{1.12, 1.12}, {0.95, 1.05}, {0.8, 0.98}, {1.2, 0.85}};
-		for (double[] t : tries) {
-			Vec3 cand = center.add(dx * t[0], up * t[1], dz * t[0]);
-			if (free(level, cand)) {
-				lean = cand;
-				break;
+		if (below) {
+			// nicht hochklettern: auf Augenhöhe bleiben; hängt die Jukebox knapp über dem Kopf, leicht in die Knie
+			// gehen und etwas Abstand halten, damit man bequem auf die Unterseite schaut
+			double camY = Math.min(eye.y, jukebox.getY() - 0.7);
+			for (double t : new double[]{1.35, 1.15, 1.6, 0.95}) {
+				Vec3 cand = new Vec3(center.x + dx * t, camY, center.z + dz * t);
+				if (free(level, cand)) {
+					lean = cand;
+					break;
+				}
+			}
+		} else {
+			// vorgebeugt: Kopf über der Vorderkante
+			double[][] tries = {{1.12, 1.12}, {0.95, 1.05}, {0.8, 0.98}, {1.2, 0.85}};
+			for (double[] t : tries) {
+				Vec3 cand = center.add(dx * t[0], up * t[1], dz * t[0]);
+				if (free(level, cand)) {
+					lean = cand;
+					break;
+				}
 			}
 		}
 		leanPos = lean != null ? lean : new Vec3(step.x, eye.y, step.z);

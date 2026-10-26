@@ -50,12 +50,21 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			server.runCommand("fill -2 100 -2 2 102 -2 minecraft:stone_bricks");
 			server.runCommand("fill -2 100 -2 -2 102 2 minecraft:stone_bricks");
 			shoot(ctx, server, "-0.9 100 -0.9 -45 35", "6_raum_schraeg");
+			// Jukebox unter der Decke (über Augenhöhe): stehen bleiben, hochschauen
+			server.runCommand("setblock 1 102 1 minecraft:jukebox");
+			ctx.waitTicks(10);
+			shoot(ctx, server, "1.5 100 -0.6 0 -40", "7_decke", new BlockPos(1, 102, 1));
 			ctx.runOnClient(mc -> mc.options.fov().set(70));
 		}
 	}
 
 	private static void shoot(ClientGameTestContext ctx, net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext server,
 			String tp, String name) {
+		shoot(ctx, server, tp, name, JUKEBOX);
+	}
+
+	private static void shoot(ClientGameTestContext ctx, net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext server,
+			String tp, String name, BlockPos jukebox) {
 		ctx.runOnClient(mc -> {
 			if (LeanView.active()) {
 				LeanView.close();
@@ -65,7 +74,7 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 		ctx.runOnClient(mc -> mc.gui.setScreen(null));
 		server.runCommand("tp @a " + tp);
 		ctx.waitTicks(40);
-		ctx.runOnClient(mc -> LeanView.open(JUKEBOX));
+		ctx.runOnClient(mc -> LeanView.open(jukebox));
 		ctx.waitTicks(40);
 		ctx.takeScreenshot(name);
 	}
