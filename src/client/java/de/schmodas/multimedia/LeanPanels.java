@@ -176,6 +176,17 @@ public final class LeanPanels {
 	}
 
 	/** Hotbar, die auf einer Kante steht (bzw. bei Decken-Jukeboxen darunter hängt), links/rechts wie man es sieht. */
+	/** Ist an dieser Stelle ein fester Block (Wand)? */
+	private static boolean blocked(Vec3 p) {
+		net.minecraft.client.multiplayer.ClientLevel level = Minecraft.getInstance().level;
+		if (level == null) {
+			return false;
+		}
+		BlockPos bp = BlockPos.containing(p);
+		var state = level.getBlockState(bp);
+		return !state.isAir() && (state.isSolidRender() || !state.getCollisionShape(level, bp).isEmpty());
+	}
+
 	private static Strip strip(Vec3 cam, Vec3 camRight, Vec3 c, double faceY, Vec3 normal, double lift, double h, boolean below) {
 		Vec3 along = new Vec3(-normal.z, 0, normal.x);
 		if (along.dot(camRight) < 0) {
@@ -184,14 +195,21 @@ public final class LeanPanels {
 		// schwebt etwas über der Kante statt direkt draufzustehen
 		double floatUp = FLOAT * Math.min(1, h / (CELL * 0.5));
 		Vec3 mid = new Vec3(c.x + normal.x * 0.5, faceY + (below ? -(lift + floatUp) : lift + floatUp), c.z + normal.z * 0.5);
+		// steht dahinter eine Wand (z. B. Jukebox in der Ecke), würde die Hotbar in der Wand stecken und unsichtbar
+		// sein: dann etwas nach innen rücken und nach vorne statt nach hinten neigen
+		double tilt = 0.12;
+		if (blocked(mid.add(normal.scale(0.05)).add(0, below ? -h * 0.5 : h * 0.5, 0))) {
+			mid = mid.subtract(normal.scale(0.03));
+			tilt = -0.12;
+		}
 		Vec3 left = mid.subtract(along.scale(0.5));
 		// leicht nach hinten geneigt, damit man gut draufschaut
-		Vec3 up = new Vec3(normal.x * 0.12, 1, normal.z * 0.12).normalize().scale(h);
+		Vec3 up = new Vec3(normal.x * tilt, 1, normal.z * tilt).normalize().scale(h);
 		Vec3 topLeft = below ? left : left.add(up);
 		Vec3 down = below ? up.scale(-1) : up.scale(-1);
 		if (below) {
 			topLeft = left; // hängt: oben ist die Kante
-			down = new Vec3(normal.x * 0.12, -1, normal.z * 0.12).normalize().scale(h);
+			down = new Vec3(normal.x * tilt, -1, normal.z * tilt).normalize().scale(h);
 		}
 		Vec3 front = cam.subtract(mid).normalize();
 		return new Strip(topLeft, along, down, front);

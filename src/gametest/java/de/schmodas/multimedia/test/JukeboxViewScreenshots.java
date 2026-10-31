@@ -69,6 +69,11 @@ public class JukeboxViewScreenshots implements FabricClientGameTest {
 			ctx.runOnClient(mc -> LeanView.signAction(mc, null));
 			ctx.waitTicks(30);
 			ctx.takeScreenshot("9_schild_editor");
+			// Jukebox in der Ecke: Wände direkt hinter den beiden hinteren Kanten
+			server.runCommand("fill 1 100 -1 1 102 1 minecraft:stone_bricks");
+			server.runCommand("fill -1 100 1 1 102 1 minecraft:stone_bricks");
+			ctx.waitTicks(10);
+			shoot(ctx, server, "-0.9 100 -0.9 -45 35", "10_ecke");
 		}
 	}
 
